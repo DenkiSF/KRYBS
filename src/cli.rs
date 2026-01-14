@@ -261,8 +261,29 @@ impl Cli {
                 println!("KRYBS {} command 'list' called", super::VERSION);
                 Ok(())
             }
-            Commands::Status { global: _, .. } => {
+            Commands::Status { global, check_integrity: _ } => {
                 println!("KRYBS {} command 'status' called", super::VERSION);
+                
+                // Пробуем загрузить конфигурацию
+                match crate::config::Config::load(global.config.as_deref()) {
+                    Ok(config) => {
+                        if global.json {
+                            // Временно закомментируем JSON вывод
+                            // println!("{}", serde_json::to_string_pretty(&config.info())?);
+                            println!("{{}}");  // Заглушка
+                        } else {
+                            println!("Configuration loaded successfully!");
+                            for (key, value) in config.info() {
+                                println!("  {}: {}", key, value);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!("Warning: Could not load configuration: {}", e);
+                        println!("Using command line arguments and defaults");
+                    }
+                }
+                
                 Ok(())
             }
             Commands::Verify { global: _, .. } => {
@@ -281,8 +302,9 @@ impl Cli {
                 println!("KRYBS {} command 'key-rotate' called", super::VERSION);
                 Ok(())
             }
-            Commands::InitConfig { global: _, .. } => {
+            Commands::InitConfig { global: _, interactive, output, defaults } => {
                 println!("KRYBS {} command 'init-config' called", super::VERSION);
+                crate::config::init_config(output.as_deref(), *interactive, *defaults)?;
                 Ok(())
             }
         }
