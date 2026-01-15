@@ -4,38 +4,230 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Расписание для конкретного профиля
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Profile {
-    pub name: String,
-    pub paths: Vec<PathBuf>,
-    pub exclude: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Schedule {
-    pub full_interval_days: u32,
-    pub snapshot_interval_hours: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Retention {
+pub struct ProfileSchedule {
+    /// Интервал полного бэкапа в днях
+    #[serde(default = "default_full_days")]
     pub full_days: u32,
+    
+    /// Интервал снэпшотов в часах
+    #[serde(default = "default_snapshot_hours")]
+    pub snapshot_hours: u32,
+}
+
+fn default_full_days() -> u32 { 30 }
+fn default_snapshot_hours() -> u32 { 6 }
+
+/// Политика хранения для конкретного профиля
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileRetention {
+    /// Хранение полных бэкапов в днях
+    #[serde(default = "default_retention_full")]
+    pub full_days: u32,
+    
+    /// Хранение снэпшотов в днях
+    #[serde(default = "default_retention_snapshot")]
     pub snapshot_days: u32,
 }
 
+fn default_retention_full() -> u32 { 90 }
+fn default_retention_snapshot() -> u32 { 30 }
+
+/// Профиль бэкапа - любой путь или сервис
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Crypto {
-    pub master_key_path: PathBuf,
-    pub recovery_key_bits: u16,
+pub struct Profile {
+    /// Имя профиля (может быть путем: "/home/docs" или именем сервиса: "postgres")
+    pub name: String,
+    
+    /// Пути для бэкапа (файлы, директории)
+    pub paths: Vec<PathBuf>,
+    
+    /// Паттерны исключения
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    
+    /// Расписание профиля (опционально)
+    #[serde(default)]
+    pub schedule: Option<ProfileSchedule>,
+    
+    /// Политика хранения профиля (опционально)
+    #[serde(default)]
+    pub retention: Option<ProfileRetention>,
 }
 
+impl Profile {
+    /// Создает профиль для произвольного пути
+    pub fn for_path(path: &Path) -> Self {
+        let name = path
+            .display()
+            .to_string()
+            .trim_end_matches('/')
+            .to_string();
+        
+        Self {
+            name,
+            paths: vec![path.to_path_buf()],
+            exclude: Vec::new(),
+            schedule: None,
+            retention: None,
+        }
+    }
+    
+    /// Получает интервал полного бэкапа
+    pub fn get_full_interval(&self, global_schedule: &GlobalSchedule) -> u32 {
+        self.schedule
+            .as_ref()
+            .map(|s| s.full_days)
+            .unwrap_or(global_schedule.full_interval_days)
+    }
+    
+    /// Получает интервал снэпшотов
+    pub fn get_snapshot_interval(&self, global_schedule: &GlobalSchedule) -> u32 {
+        self.schedule
+            .as_ref()
+            .map(|s| s.snapshot_hours)
+            .unwrap_or(global_schedule.snapshot_interval_hours)
+    }
+    
+    /// Получает политику хранения полных бэкапов
+    pub fn get_full_retention(&self, global_retention: &GlobalRetention) -> u32 {
+        self.retention
+            .as_ref()
+            .map(|r| r.full_days)
+            .unwrap_or(global_retention.full_days)
+    }
+    
+    /// Получает политику хранения снэпшотов
+    pub fn get_snapshot_retention(&self, global_retention: &GlobalRetention) -> u32 {
+        self.retention
+            .as_ref()
+            .map(|r| r.snapshot_days)
+            .unwrap_or(global_retention.snapshot_days)
+    }
+}
+
+/// Глобальное расписание (значения по умолчанию)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlobalSchedule {
+    /// Глобальный интервал полного бэкапа в днях
+    #[serde(default = "default_global_full_days")]
+    pub full_interval_days: u32,
+    
+    /// Глобальный интервал снэпшотов в часах
+    #[serde(default = "default_global_snapshot_hours")]
+    pub snapshot_interval_hours: u32,
+}
+
+fn default_global_full_days() -> u32 { 60 }
+fn default_global_snapshot_hours() -> u32 { 24 }
+
+/// Глобальная политика хранения
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlobalRetention {
+    /// Глобальное хранение полных бэкапов в днях
+    #[serde(default = "default_global_full_days")]
+    pub full_days: u32,
+    
+    /// Глобальное хранение снэпшотов в днях
+    #[serde(default = "default_global_snapshot_days")]
+    pub snapshot_days: u32,
+}
+
+fn default_global_snapshot_days() -> u32 { 180 }
+
+/// Криптография
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CryptoConfig {
+    /// Путь к мастер-ключу
+    #[serde(default = "default_master_key_path")]
+    pub master_key_path: PathBuf,
+}
+
+fn default_master_key_path() -> PathBuf {
+    PathBuf::from("/etc/krybs/master.key")
+}
+
+/// Основная конфигурация
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    pub backup_dir: PathBuf,
+    /// Глобальные настройки
+    #[serde(default)]
+    pub core: CoreConfig,
+    
+    /// Глобальное расписание (значения по умолчанию для профилей)
+    #[serde(default)]
+    pub schedule: GlobalSchedule,
+    
+    /// Глобальная политика хранения (значения по умолчанию для профилей)
+    #[serde(default)]
+    pub retention: GlobalRetention,
+    
+    /// Криптография
+    #[serde(default)]
+    pub crypto: CryptoConfig,
+    
+    /// Профили бэкапа
+    #[serde(default)]
     pub profiles: Vec<Profile>,
-    pub schedule: Schedule,
-    pub retention: Retention,
-    pub crypto: Crypto,
+}
+
+/// Глобальные настройки
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoreConfig {
+    /// Директория для хранения бэкапов
+    #[serde(default = "default_backup_dir")]
+    pub backup_dir: PathBuf,
+}
+
+fn default_backup_dir() -> PathBuf {
+    PathBuf::from("/backup")
+}
+
+impl Default for CoreConfig {
+    fn default() -> Self {
+        Self {
+            backup_dir: default_backup_dir(),
+        }
+    }
+}
+
+impl Default for GlobalSchedule {
+    fn default() -> Self {
+        Self {
+            full_interval_days: default_global_full_days(),
+            snapshot_interval_hours: default_global_snapshot_hours(),
+        }
+    }
+}
+
+impl Default for GlobalRetention {
+    fn default() -> Self {
+        Self {
+            full_days: default_global_full_days(),
+            snapshot_days: default_global_snapshot_days(),
+        }
+    }
+}
+
+impl Default for CryptoConfig {
+    fn default() -> Self {
+        Self {
+            master_key_path: default_master_key_path(),
+        }
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            core: CoreConfig::default(),
+            schedule: GlobalSchedule::default(),
+            retention: GlobalRetention::default(),
+            crypto: CryptoConfig::default(),
+            profiles: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -44,7 +236,7 @@ pub enum ConfigError {
     Invalid(String),
     IoError(std::io::Error),
     ParseError(toml::de::Error),
-    SerializeError(toml::ser::Error),  // Добавлен новый вариант
+    SerializeError(toml::ser::Error),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -54,7 +246,7 @@ impl std::fmt::Display for ConfigError {
             ConfigError::Invalid(msg) => write!(f, "Invalid configuration: {}", msg),
             ConfigError::IoError(e) => write!(f, "IO error: {}", e),
             ConfigError::ParseError(e) => write!(f, "Parse error: {}", e),
-            ConfigError::SerializeError(e) => write!(f, "Serialize error: {}", e),  // Добавлен
+            ConfigError::SerializeError(e) => write!(f, "Serialize error: {}", e),
         }
     }
 }
@@ -88,61 +280,32 @@ impl Config {
         Ok(config)
     }
     
-    /// Создаёт дефолтную конфигурацию
-    pub fn default() -> Self {
-        let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        
-        Self {
-            backup_dir: PathBuf::from("/backup"),
-            profiles: vec![
-                Profile {
-                    name: "system".to_string(),
-                    paths: vec![
-                        PathBuf::from("/etc"),
-                        PathBuf::from("/home"),
-                    ],
-                    exclude: vec![
-                        "/tmp".to_string(),
-                        "*.log".to_string(),
-                        "*.tmp".to_string(),
-                    ],
-                },
-                Profile {
-                    name: "web".to_string(),
-                    paths: vec![
-                        PathBuf::from("/var/www"),
-                    ],
-                    exclude: vec![
-                        "*.tmp".to_string(),
-                        "cache/*".to_string(),
-                    ],
-                },
-            ],
-            schedule: Schedule {
-                full_interval_days: 60,
-                snapshot_interval_hours: 24,
-            },
-            retention: Retention {
-                full_days: 365,
-                snapshot_days: 180,
-            },
-            crypto: Crypto {
-                master_key_path: home_dir.join(".krybs/master.key"),
-                recovery_key_bits: 128,
-            },
-        }
+    /// Находит профиль по имени
+    pub fn find_profile(&self, name: &str) -> Option<&Profile> {
+        self.profiles.iter().find(|p| p.name == name)
+    }
+    
+    /// Находит профиль по пути
+    pub fn find_profile_by_path(&self, path: &Path) -> Option<&Profile> {
+        let path_str = path.display().to_string();
+        self.profiles.iter().find(|p| 
+            p.paths.iter().any(|profile_path| 
+                profile_path.display().to_string() == path_str
+            )
+        )
     }
     
     /// Валидирует конфигурацию
     pub fn validate(&self) -> Result<(), ConfigError> {
         // Проверка backup_dir
-        if !self.backup_dir.is_absolute() {
+        if !self.core.backup_dir.is_absolute() {
             return Err(ConfigError::Invalid(
-                format!("backup_dir must be absolute path: {}", self.backup_dir.display())
+                format!("backup_dir must be absolute path: {}", 
+                        self.core.backup_dir.display())
             ));
         }
         
-        // Проверка интервалов
+        // Проверка интервалов глобального расписания
         if self.schedule.full_interval_days == 0 {
             return Err(ConfigError::Invalid(
                 "full_interval_days must be greater than 0".to_string()
@@ -155,7 +318,7 @@ impl Config {
             ));
         }
         
-        // Проверка политик хранения
+        // Проверка глобальной политики хранения
         if self.retention.full_days == 0 {
             return Err(ConfigError::Invalid(
                 "full_days must be greater than 0".to_string()
@@ -169,12 +332,6 @@ impl Config {
         }
         
         // Проверка профилей
-        if self.profiles.is_empty() {
-            return Err(ConfigError::Invalid(
-                "At least one profile must be defined".to_string()
-            ));
-        }
-        
         for profile in &self.profiles {
             if profile.paths.is_empty() {
                 return Err(ConfigError::Invalid(
@@ -182,25 +339,39 @@ impl Config {
                 ));
             }
             
-            // Проверяем, что все пути абсолютные
-            for path in &profile.paths {
-                if !path.is_absolute() {
+            // Проверяем расписание профиля, если указано
+            if let Some(schedule) = &profile.schedule {
+                if schedule.full_days == 0 {
                     return Err(ConfigError::Invalid(
-                        format!("Profile '{}': path '{}' must be absolute", 
-                                profile.name, path.display())
+                        format!("Profile '{}': full_days must be greater than 0", 
+                                profile.name)
+                    ));
+                }
+                
+                if schedule.snapshot_hours == 0 {
+                    return Err(ConfigError::Invalid(
+                        format!("Profile '{}': snapshot_hours must be greater than 0", 
+                                profile.name)
                     ));
                 }
             }
-        }
-        
-        // Проверка crypto
-        if self.crypto.recovery_key_bits != 128 && 
-           self.crypto.recovery_key_bits != 192 && 
-           self.crypto.recovery_key_bits != 256 {
-            return Err(ConfigError::Invalid(
-                format!("recovery_key_bits must be 128, 192, or 256, got {}", 
-                        self.crypto.recovery_key_bits)
-            ));
+            
+            // Проверяем политику хранения профиля, если указано
+            if let Some(retention) = &profile.retention {
+                if retention.full_days == 0 {
+                    return Err(ConfigError::Invalid(
+                        format!("Profile '{}': full_days must be greater than 0", 
+                                profile.name)
+                    ));
+                }
+                
+                if retention.snapshot_days == 0 {
+                    return Err(ConfigError::Invalid(
+                        format!("Profile '{}': snapshot_days must be greater than 0", 
+                                profile.name)
+                    ));
+                }
+            }
         }
         
         Ok(())
@@ -228,21 +399,25 @@ impl Config {
         let mut info = HashMap::new();
         
         info.insert("backup_dir".to_string(), 
-                   self.backup_dir.display().to_string());
-        info.insert("profiles".to_string(), 
-                   self.profiles.iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(", "));
-        info.insert("full_interval_days".to_string(), 
-                   self.schedule.full_interval_days.to_string());
-        info.insert("snapshot_interval_hours".to_string(), 
-                   self.schedule.snapshot_interval_hours.to_string());
-        info.insert("full_retention_days".to_string(), 
-                   self.retention.full_days.to_string());
-        info.insert("snapshot_retention_days".to_string(), 
-                   self.retention.snapshot_days.to_string());
+                   self.core.backup_dir.display().to_string());
         info.insert("master_key_path".to_string(), 
                    self.crypto.master_key_path.display().to_string());
-        info.insert("recovery_key_bits".to_string(), 
-                   self.crypto.recovery_key_bits.to_string());
+        info.insert("global_full_interval".to_string(), 
+                   self.schedule.full_interval_days.to_string());
+        info.insert("global_snapshot_interval".to_string(), 
+                   self.schedule.snapshot_interval_hours.to_string());
+        info.insert("global_full_retention".to_string(), 
+                   self.retention.full_days.to_string());
+        info.insert("global_snapshot_retention".to_string(), 
+                   self.retention.snapshot_days.to_string());
+        info.insert("profiles_count".to_string(), 
+                   self.profiles.len().to_string());
+        
+        if !self.profiles.is_empty() {
+            let profile_names: Vec<String> = 
+                self.profiles.iter().map(|p| p.name.clone()).collect();
+            info.insert("profiles".to_string(), profile_names.join(", "));
+        }
         
         info
     }
@@ -271,9 +446,63 @@ fn get_config_paths(custom_path: Option<&Path>) -> Vec<PathBuf> {
     paths
 }
 
-/// Инициализирует конфигурационный файл
+/// Инициализирует конфигурационный файл с примерами
 pub fn init_config(output_path: Option<&Path>, interactive: bool, _defaults: bool) -> Result<()> {
-    let config = Config::default();
+    let mut config = Config::default();
+    
+    // Добавляем примеры профилей
+    config.profiles = vec![
+        Profile {
+            name: "postgres".to_string(),
+            paths: vec![
+                PathBuf::from("/var/lib/postgresql"),
+                PathBuf::from("/etc/postgresql"),
+            ],
+            exclude: vec!["*.wal".to_string()],
+            schedule: Some(ProfileSchedule {
+                full_days: 30,
+                snapshot_hours: 6,
+            }),
+            retention: Some(ProfileRetention {
+                full_days: 90,
+                snapshot_days: 30,
+            }),
+        },
+        Profile {
+            name: "/home/docs".to_string(),
+            paths: vec![
+                PathBuf::from("/home/user/docs"),
+            ],
+            exclude: vec!["cache/".to_string()],
+            schedule: None,
+            retention: None,
+        },
+        Profile {
+            name: "nginx-service".to_string(),
+            paths: vec![
+                PathBuf::from("/etc/nginx"),
+                PathBuf::from("/var/log/nginx"),
+            ],
+            exclude: vec!["*.tmp".to_string(), "cache/".to_string()],
+            schedule: Some(ProfileSchedule {
+                full_days: 7,
+                snapshot_hours: 12,
+            }),
+            retention: Some(ProfileRetention {
+                full_days: 30,
+                snapshot_days: 7,
+            }),
+        },
+        Profile {
+            name: "system-logs".to_string(),
+            paths: vec![
+                PathBuf::from("/var/log"),
+            ],
+            exclude: vec!["*.tmp".to_string(), "*.temp".to_string()],
+            schedule: None,
+            retention: None,
+        },
+    ];
     
     // Определяем путь для сохранения
     let save_path = match output_path {
@@ -290,14 +519,25 @@ pub fn init_config(output_path: Option<&Path>, interactive: bool, _defaults: boo
     
     println!("Creating configuration file at: {}", save_path.display());
     println!("Configuration:");
-    println!("  Backup directory: {}", config.backup_dir.display());
-    println!("  Profiles: {}", config.profiles.iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(", "));
-    println!("  Full backup interval: {} days", config.schedule.full_interval_days);
-    println!("  Snapshot interval: {} hours", config.schedule.snapshot_interval_hours);
-    println!("  Full backup retention: {} days", config.retention.full_days);
-    println!("  Snapshot retention: {} days", config.retention.snapshot_days);
+    println!("  Backup directory: {}", config.core.backup_dir.display());
     println!("  Master key path: {}", config.crypto.master_key_path.display());
-    println!("  Recovery key bits: {}", config.crypto.recovery_key_bits);
+    println!("  Global full interval: {} days", config.schedule.full_interval_days);
+    println!("  Global snapshot interval: {} hours", config.schedule.snapshot_interval_hours);
+    println!("  Global full retention: {} days", config.retention.full_days);
+    println!("  Global snapshot retention: {} days", config.retention.snapshot_days);
+    println!("  Example profiles ({}):", config.profiles.len());
+    
+    for profile in &config.profiles {
+        println!("    - {} ({} paths)", profile.name, profile.paths.len());
+        if let Some(schedule) = &profile.schedule {
+            println!("      Schedule: full every {} days, snapshot every {} hours", 
+                    schedule.full_days, schedule.snapshot_hours);
+        }
+        if let Some(retention) = &profile.retention {
+            println!("      Retention: full {} days, snapshot {} days", 
+                    retention.full_days, retention.snapshot_days);
+        }
+    }
     
     if interactive {
         use std::io::{self, Write};
