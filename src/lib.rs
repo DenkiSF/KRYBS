@@ -1,9 +1,10 @@
+// src/lib.rs
+pub mod backup;
 pub mod cli;
 pub mod config;
-pub mod storage;
-pub mod backup;
+pub mod crypto;  // Модуль оставлен, но содержит заглушки
 pub mod snapshot;
-// pub mod logger;
+pub mod storage;
 
 use anyhow::Result;
 use clap::Parser;

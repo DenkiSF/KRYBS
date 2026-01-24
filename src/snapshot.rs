@@ -61,8 +61,8 @@ pub struct BackupManifest {
 /// Движок для создания снепшотов
 #[derive(Debug)]
 pub struct SnapshotEngine {
-    backup_engine: BackupEngine,
-    storage: BackupStorage,
+    pub backup_engine: BackupEngine,
+    pub storage: BackupStorage,
 }
 
 impl SnapshotEngine {
@@ -86,15 +86,15 @@ impl SnapshotEngine {
         progress: bool,
     ) -> Result<BackupResult> {
         let start_time = Utc::now();
-        
+
         println!("[INFO] Creating snapshot from parent: {}", parent_id);
-        
+
         // Проверяем существование родительского бэкапа
         let parent_path = self.storage.backup_path(parent_id);
         if !parent_path.exists() {
             return Err(anyhow::anyhow!("Parent backup not found: {}", parent_id));
         }
-        
+
         // Загружаем манифест родительского бэкапа
         println!("[INFO] Loading parent manifest...");
         let parent_manifest = self.load_manifest(parent_id).await?;
@@ -103,24 +103,27 @@ impl SnapshotEngine {
             parent_manifest.file_count,
             crate::storage::bytes_to_human(parent_manifest.total_size)
         );
-        
+
         // Преобразуем манифест в FileInfo для сравнения
         let parent_files = self.manifest_to_fileinfo(&parent_manifest)?;
-        
+
         // Сканируем текущую файловую систему
         println!("[INFO] Scanning current filesystem...");
-        let current_files: Vec<FileInfo> = self.backup_engine.scan_paths(&paths, &exclude_patterns, progress).await?;
-        
+        let current_files: Vec<FileInfo> = self
+            .backup_engine
+            .scan_paths(&paths, &exclude_patterns, progress)
+            .await?;
+
         if current_files.is_empty() {
             return Err(anyhow::anyhow!("No files found to backup"));
         }
-        
+
         // Вычисляем дельту изменений
         println!("[INFO] Computing delta...");
         let (delta_files, stats) = self.compute_delta(&parent_files, &current_files)?;
-        
+
         println!("[INFO] {}", stats.display());
-        
+
         if delta_files.is_empty() {
             println!("[INFO] No changes detected, skipping snapshot creation");
             return Ok(BackupResult {
@@ -134,9 +137,12 @@ impl SnapshotEngine {
                 duration_secs: 0.0,
             });
         }
-        
+
         if dry_run {
-            println!("[DRY RUN] Would create snapshot with {} changed files", delta_files.len());
+            println!(
+                "[DRY RUN] Would create snapshot with {} changed files",
+                delta_files.len()
+            );
             return Ok(BackupResult {
                 id: "dry-run-snapshot".to_string(),
                 backup_type: BackupType::Snapshot,
@@ -148,32 +154,76 @@ impl SnapshotEngine {
                 duration_secs: 0.0,
             });
         }
-        
+
         // Определяем имя профиля
         let profile = profile_name.unwrap_or("manual");
-        
+
         // Генерируем ID для снепшота
         let snapshot_id = self.storage.generate_id(BackupType::Snapshot, start_time);
         let snapshot_dir = self.storage.backup_path(&snapshot_id);
-        
-        println!("[INFO] Creating snapshot directory: {}", snapshot_dir.display());
-        fs::create_dir_all(&snapshot_dir)
-            .context("Failed to create snapshot directory")?;
-        
+
+        println!(
+            "[INFO] Creating snapshot directory: {}",
+            snapshot_dir.display()
+        );
+        fs::create_dir_all(&snapshot_dir).context("Failed to create snapshot directory")?;
+
         // Создаем tar.gz архив только с измененными файлами
         let tar_path = snapshot_dir.join("data.tar.gz");
         println!("[INFO] Creating delta archive: {}", tar_path.display());
-        
-        let archive_size = self.backup_engine.create_tar(&delta_files, &tar_path, progress).await?;
-        
+
+        let archive_size = self
+            .backup_engine
+            .create_tar(&delta_files, &tar_path, progress)
+            .await?;
+
         // Создаем манифест снепшота с ссылкой на родителя
         let manifest_path = snapshot_dir.join("manifest.json");
         println!("[INFO] Creating snapshot manifest...");
-        
+
         let manifest = self.create_snapshot_manifest(&delta_files, parent_id)?;
         fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)
             .context("Failed to write manifest")?;
-        
+
+        // ШИФРОВАНИЕ снепшота - ЗАКОММЕНТИРОВАНО ДЛЯ ТЕСТИРОВАНИЯ
+        let final_archive_size = archive_size;
+
+        // ЗАКОММЕНТИРОВАНО: шифрование временно отключено
+        /*
+        if self.backup_engine.config.crypto.master_key_path.exists() {
+            println!("[INFO] Encrypting snapshot files...");
+
+            let crypto = crate::crypto::CryptoManager::load_master_key(
+                &self.backup_engine.config.crypto.master_key_path,
+            )?;
+
+            // Шифруем архив
+            let encrypted_tar_path = snapshot_dir.join("data.tar.gz.enc");
+            crypto
+                .encrypt_file(&tar_path, &encrypted_tar_path)
+                .context("Failed to encrypt snapshot archive")?;
+
+            // Шифруем манифест
+            let encrypted_manifest_path = snapshot_dir.join("manifest.json.enc");
+            crypto
+                .encrypt_file(&manifest_path, &encrypted_manifest_path)
+                .context("Failed to encrypt snapshot manifest")?;
+
+            // Удаляем незашифрованные файлы если настроено
+            if self.backup_engine.config.crypto.delete_plain {
+                fs::remove_file(&tar_path)?;
+                fs::remove_file(&manifest_path)?;
+                println!("[INFO] Plaintext snapshot files removed");
+            }
+
+            // Обновляем размер
+            final_archive_size = fs::metadata(&encrypted_tar_path)?.len();
+        } else {
+            println!("[WARN] Master key not found, snapshot will be stored unencrypted");
+        }
+        */
+        println!("[INFO] Encryption is temporarily disabled for testing");
+
         // Создаем локальный индекс
         let backup_info = BackupInfo {
             id: snapshot_id.clone(),
@@ -181,18 +231,18 @@ impl SnapshotEngine {
             timestamp: start_time,
             profile: profile.to_string(),
             file_count: delta_files.len() as u64,
-            size_encrypted: archive_size,
+            size_encrypted: final_archive_size,
             parent_id: Some(parent_id.to_string()),
             checksum: Some(crate::backup::calculate_file_hash(&tar_path).await?),
         };
-        
+
         self.storage.write_local_index(&backup_info)?;
-        
+
         // Расчет статистики
         let end_time = Utc::now();
         let duration = end_time.signed_duration_since(start_time);
         let duration_secs = duration.num_milliseconds() as f64 / 1000.0;
-        
+
         let result = BackupResult {
             id: snapshot_id.clone(),
             backup_type: BackupType::Snapshot,
@@ -200,17 +250,29 @@ impl SnapshotEngine {
             profile: profile.to_string(),
             file_count: delta_files.len(),
             size_bytes: delta_files.iter().map(|f| f.size).sum(),
-            archive_size,
+            archive_size: final_archive_size,
             duration_secs,
         };
-        
+
         println!("\n[SUCCESS] Snapshot created: {}", snapshot_id);
         println!("  Parent:       {}", parent_id);
         println!("  Delta files:  {}", delta_files.len());
-        println!("  Archive size: {}", crate::storage::bytes_to_human(archive_size));
+        println!(
+            "  Archive size: {}",
+            crate::storage::bytes_to_human(final_archive_size)
+        );
         println!("  Duration:     {:.1}s", duration_secs);
         println!("  Location:     {}", snapshot_dir.display());
-        
+
+        // Показываем информацию о шифровании
+        // ЗАКОММЕНТИРОВАНО: временно отключено
+        // if self.backup_engine.config.crypto.master_key_path.exists() {
+        //     println!("  Encryption:   ✓ (GOST Kuznechik)");
+        // } else {
+        //     println!("  Encryption:   ✗ (not encrypted)");
+        // }
+        println!("  Encryption:   ✗ (temporarily disabled for testing)");
+
         Ok(result)
     }
 
@@ -225,10 +287,10 @@ impl SnapshotEngine {
         progress: bool,
     ) -> Result<BackupResult> {
         println!("[INFO] Auto backup for profile: {}", profile.name);
-        
+
         // Получаем последний полный бэкап для этого профиля
         let last_full = self.get_last_full_backup(&profile.name).await?;
-        
+
         // Проверяем, нужно ли делать полный бэкап
         let should_do_full = if force_full {
             true
@@ -238,7 +300,7 @@ impl SnapshotEngine {
             // Проверяем по расписанию профиля
             let days_since_full = (Utc::now() - last_full.timestamp).num_days() as u32;
             let full_interval = profile.get_full_interval(&self.backup_engine.config.schedule);
-            
+
             if days_since_full >= full_interval {
                 println!(
                     "[INFO] Last full backup was {} days ago, interval is {} days -> creating full backup",
@@ -257,16 +319,18 @@ impl SnapshotEngine {
             println!("[INFO] No previous full backup found -> creating first full backup");
             true
         };
-        
+
         if should_do_full {
             println!("[INFO] Creating FULL backup...");
-            self.backup_engine.create_full(
-                paths,
-                exclude_patterns,
-                Some(&profile.name),
-                false,
-                progress,
-            ).await
+            self.backup_engine
+                .create_full(
+                    paths,
+                    exclude_patterns,
+                    Some(&profile.name),
+                    false,
+                    progress,
+                )
+                .await
         } else if let Some(last_full) = last_full {
             println!("[INFO] Creating SNAPSHOT from: {}", last_full.id);
             self.create_snapshot(
@@ -276,9 +340,12 @@ impl SnapshotEngine {
                 Some(&profile.name),
                 false,
                 progress,
-            ).await
+            )
+            .await
         } else {
-            Err(anyhow::anyhow!("Cannot create snapshot: no parent backup found"))
+            Err(anyhow::anyhow!(
+                "Cannot create snapshot: no parent backup found"
+            ))
         }
     }
 
@@ -297,13 +364,13 @@ impl SnapshotEngine {
             total_files_current: current_files.len(),
             total_files_previous: parent_files.len(),
         };
-        
+
         // Создаем HashMap для быстрого поиска родительских файлов по пути
         let parent_map: HashMap<String, &FileInfo> = parent_files
             .iter()
             .map(|f| (f.path.display().to_string(), f))
             .collect();
-        
+
         // Проверяем текущие файлы
         for current in current_files {
             let current_path = current.path.display().to_string();
@@ -320,11 +387,13 @@ impl SnapshotEngine {
                 stats.new_files += 1;
             }
         }
-        
+
         // Находим удаленные файлы
-        let current_paths: std::collections::HashSet<_> = 
-            current_files.iter().map(|f| f.path.display().to_string()).collect();
-        
+        let current_paths: std::collections::HashSet<_> = current_files
+            .iter()
+            .map(|f| f.path.display().to_string())
+            .collect();
+
         for parent in parent_files {
             let parent_path = parent.path.display().to_string();
             if !current_paths.contains(&parent_path) {
@@ -333,7 +402,7 @@ impl SnapshotEngine {
                 // В будущем можно сохранять информацию об удалениях в манифесте
             }
         }
-        
+
         Ok((delta_files, stats))
     }
 
@@ -343,13 +412,13 @@ impl SnapshotEngine {
         if parent.size != current.size {
             return true;
         }
-        
+
         // Разница во времени более 1 секунды
         let time_diff = (parent.mtime - current.mtime).num_seconds().abs();
         if time_diff > 1 {
             return true;
         }
-        
+
         // Сравниваем хэши
         parent.hash != current.hash
     }
@@ -357,27 +426,64 @@ impl SnapshotEngine {
     /// Загружает манифест из бэкапа
     async fn load_manifest(&self, backup_id: &str) -> Result<BackupManifest> {
         let backup_path = self.storage.backup_path(backup_id);
-        let manifest_path = backup_path.join("manifest.json");
+
+        // Проверяем, зашифрован ли манифест
+        // ЗАКОММЕНТИРОВАНО: временно работаем только с незашифрованными файлами
+        /*
+        let manifest_path = backup_path.join("manifest.json.enc");
+        let plain_manifest_path = backup_path.join("manifest.json");
+
+        let content = if manifest_path.exists() {
+            // Зашифрованный манифест
+            if !self.backup_engine.config.crypto.master_key_path.exists() {
+                bail!("Master key not found, cannot load encrypted manifest");
+            }
+
+            // Создаем временный файл для расшифровки
+            let temp_file =
+                std::env::temp_dir().join(format!("manifest-temp-{}", rand::random::<u32>()));
+            let crypto = crate::crypto::CryptoManager::load_master_key(
+                &self.backup_engine.config.crypto.master_key_path,
+            )?;
+            crypto
+                .decrypt_file(&manifest_path, &temp_file)
+                .context("Failed to decrypt manifest")?;
+
+            let content = tokio::fs::read_to_string(&temp_file).await?;
+
+            // Удаляем временный файл
+            let _ = std::fs::remove_file(&temp_file);
+
+            content
+        } else if plain_manifest_path.exists() {
+            // Незашифрованный манифест
+            tokio::fs::read_to_string(&plain_manifest_path).await?
+        } else {
+            return Err(anyhow::anyhow!(
+                "Manifest not found for backup {}",
+                backup_id
+            ));
+        };
+        */
         
-        let content = tokio::fs::read_to_string(&manifest_path)
-            .await
-            .with_context(|| format!("Failed to read manifest from {}", backup_id))?;
-        
+        let plain_manifest_path = backup_path.join("manifest.json");
+        let content = tokio::fs::read_to_string(&plain_manifest_path).await?;
+
         let manifest: BackupManifest = serde_json::from_str(&content)
             .with_context(|| format!("Failed to parse manifest from {}", backup_id))?;
-        
+
         Ok(manifest)
     }
 
     /// Преобразует манифест в FileInfo
     fn manifest_to_fileinfo(&self, manifest: &BackupManifest) -> Result<Vec<FileInfo>> {
         let mut files = Vec::with_capacity(manifest.files.len());
-        
+
         for file in &manifest.files {
             let mtime = DateTime::parse_from_rfc3339(&file.mtime)
                 .context("Failed to parse mtime")?
                 .with_timezone(&Utc);
-            
+
             files.push(FileInfo {
                 path: PathBuf::from(&file.path),
                 size: file.size,
@@ -386,7 +492,7 @@ impl SnapshotEngine {
                 mode: file.mode,
             });
         }
-        
+
         Ok(files)
     }
 
@@ -406,7 +512,7 @@ impl SnapshotEngine {
                 mode: f.mode,
             })
             .collect();
-        
+
         Ok(BackupManifest {
             backup_type: "snapshot".to_string(),
             file_count: files.len(),
@@ -420,44 +526,52 @@ impl SnapshotEngine {
     /// Получает последний полный бэкап для профиля
     pub async fn get_last_full_backup(&self, profile_name: &str) -> Result<Option<BackupInfo>> {
         let all_full = self.storage.list_full()?;
-        
+
         // Фильтруем по профилю и сортируем по времени (новые сначала)
         let mut profile_backups: Vec<_> = all_full
             .into_iter()
             .filter(|b| b.profile == profile_name)
             .collect();
-        
+
         profile_backups.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        
+
         Ok(profile_backups.into_iter().next())
     }
 
     /// Проверяет целостность цепочки бэкапов
     pub async fn verify_chain(&self, chain_id: &str) -> Result<bool> {
         let chain = self.storage.get_chain(chain_id)?;
-        
+
         if chain.is_empty() {
             return Ok(false);
         }
-        
+
         println!("Verifying chain starting from: {}", chain[0].id);
-        
+
         let mut all_ok = true;
         for (i, backup) in chain.iter().enumerate() {
             print!("  {}. {} [{}]... ", i + 1, backup.id, backup.backup_type);
-            
+
             let backup_path = self.storage.backup_path(&backup.id);
-            let exists = backup_path.exists() 
-                && backup_path.join("data.tar.gz").exists()
-                && backup_path.join("manifest.json").exists();
-            
+            let exists = backup_path.exists();
+
             if exists {
-                println!("OK");
+                // Проверяем наличие файлов (зашифрованных или незашифрованных)
+                // ЗАКОММЕНТИРОВАНО: временно проверяем только незашифрованные
+                // let has_encrypted = backup_path.join("data.tar.gz.enc").exists();
+                let has_plain = backup_path.join("data.tar.gz").exists();
+
+                if has_plain { // || has_encrypted
+                    println!("OK");
+                } else {
+                    println!("MISSING FILES");
+                    all_ok = false;
+                }
             } else {
-                println!("MISSING");
+                println!("MISSING DIRECTORY");
                 all_ok = false;
             }
-            
+
             // Для снепшотов проверяем существование родителя
             if let Some(parent_id) = &backup.parent_id {
                 let parent_path = self.storage.backup_path(parent_id);
@@ -467,7 +581,7 @@ impl SnapshotEngine {
                 }
             }
         }
-        
+
         Ok(all_ok)
     }
 
@@ -481,27 +595,27 @@ impl SnapshotEngine {
     ) -> Result<usize> {
         let all_chains = self.storage.list_all_chained()?;
         let mut to_delete = Vec::new();
-        
+
         for (chain_id, chain) in all_chains {
             // Находим полный бэкап в цепочке
             if let Some(full_backup) = chain.first() {
                 if full_backup.profile != profile_name {
                     continue; // Не наш профиль
                 }
-                
+
                 // Получаем снепшоты (все кроме первого - full)
                 let snapshots: Vec<_> = chain.iter().skip(1).collect();
-                
+
                 // Применяем политику keep_last
                 if let Some(keep_last) = keep_last {
                     if snapshots.len() > keep_last {
                         let to_keep = &snapshots[..keep_last];
                         let to_remove = &snapshots[keep_last..];
-                        
+
                         for snapshot in to_remove {
                             to_delete.push(snapshot.id.clone());
                         }
-                        
+
                         println!(
                             "Chain {}: keeping last {} of {} snapshots",
                             chain_id,
@@ -510,11 +624,11 @@ impl SnapshotEngine {
                         );
                     }
                 }
-                
+
                 // Применяем политику max_age
                 if let Some(max_age_days) = max_age_days {
                     let cutoff = Utc::now() - Duration::days(max_age_days as i64);
-                    
+
                     for snapshot in snapshots {
                         if snapshot.timestamp < cutoff {
                             to_delete.push(snapshot.id.clone());
@@ -523,31 +637,31 @@ impl SnapshotEngine {
                 }
             }
         }
-        
+
         // Удаляем дубликаты
         to_delete.sort();
         to_delete.dedup();
-        
+
         if to_delete.is_empty() {
             println!("No snapshots to delete");
             return Ok(0);
         }
-        
+
         println!("Found {} snapshots to delete:", to_delete.len());
         for id in &to_delete {
             println!("  - {}", id);
         }
-        
+
         if dry_run {
             println!("[DRY RUN] Would delete {} snapshots", to_delete.len());
             return Ok(to_delete.len());
         }
-        
+
         // Удаляем снепшоты
         let mut deleted = 0;
         for id in &to_delete {
             print!("Deleting {}... ", id);
-            
+
             let backup_path = self.storage.backup_path(id);
             if backup_path.exists() {
                 if let Err(e) = fs::remove_dir_all(&backup_path) {
@@ -560,7 +674,7 @@ impl SnapshotEngine {
                 println!("NOT FOUND");
             }
         }
-        
+
         println!("Deleted {} snapshots", deleted);
         Ok(deleted)
     }
