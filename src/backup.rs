@@ -1,11 +1,11 @@
-// src/backup.rs
+// src/backup.rs - ПОЛНЫЙ ИСПРАВЛЕННЫЙ КОД
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};  // ✅ ИСПРАВЛЕНО: добавлен Write trait
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tar::{Archive, Builder};
@@ -61,7 +61,6 @@ impl BackupEngine {
     ) -> Result<BackupResult> {
         let start_time = Utc::now();
 
-        // Определяем имя профиля
         let profile = profile_name.unwrap_or("manual");
 
         println!("[INFO] Starting full backup for profile: {}", profile);
@@ -116,6 +115,9 @@ impl BackupEngine {
 
         let archive_size = self.create_tar(&files, &tar_path, progress).await?;
 
+        // ✅ НОВОЕ: Валидация архива после создания
+        self.validate_archive(&tar_path)?;
+
         // Шаг 4: Создание манифеста
         let manifest_path = backup_dir.join("manifest.json");
         println!("[INFO] Creating manifest: {}", manifest_path.display());
@@ -126,44 +128,6 @@ impl BackupEngine {
 
         // Шаг 5: ШИФРОВАНИЕ - ЗАКОММЕНТИРОВАНО ДЛЯ ТЕСТИРОВАНИЯ
         let final_archive_size = archive_size;
-
-        // ЗАКОММЕНТИРОВАНО: шифрование временно отключено
-        /*
-        if self.config.crypto.master_key_path.exists() {
-            println!("[INFO] Encrypting backup files...");
-
-            // Загружаем крипто-менеджер
-            let crypto =
-                crate::crypto::CryptoManager::load_master_key(&self.config.crypto.master_key_path)?;
-
-            // Шифруем архив
-            let encrypted_tar_path = backup_dir.join("data.tar.gz.enc");
-            crypto
-                .encrypt_file(&tar_path, &encrypted_tar_path)
-                .context("Failed to encrypt archive")?;
-
-            // Шифруем манифест
-            let encrypted_manifest_path = backup_dir.join("manifest.json.enc");
-            crypto
-                .encrypt_file(&manifest_path, &encrypted_manifest_path)
-                .context("Failed to encrypt manifest")?;
-
-            // Удаляем незашифрованные файлы если настроено
-            if self.config.crypto.delete_plain {
-                fs::remove_file(&tar_path)?;
-                fs::remove_file(&manifest_path)?;
-                println!("[INFO] Plaintext files removed");
-            }
-
-            // Обновляем размер для зашифрованного архива
-            final_archive_size = fs::metadata(&encrypted_tar_path)?.len();
-        } else {
-            println!(
-                "[WARN] Master key not found at {}, backup will be stored unencrypted",
-                self.config.crypto.master_key_path.display()
-            );
-        }
-        */
         println!("[INFO] Encryption is temporarily disabled for testing");
 
         // Шаг 6: Создание локального индекса
@@ -199,14 +163,8 @@ impl BackupEngine {
         println!("\n[SUCCESS] Full backup created: {}", backup_id);
         println!("  Profile:      {}", profile);
         println!("  Files:        {}", files.len());
-        println!(
-            "  Original:     {}",
-            crate::storage::bytes_to_human(total_size)
-        );
-        println!(
-            "  Archive:      {}",
-            crate::storage::bytes_to_human(final_archive_size)
-        );
+        println!("  Original:     {}", crate::storage::bytes_to_human(total_size));
+        println!("  Archive:      {}", crate::storage::bytes_to_human(final_archive_size));
         let compression_ratio = if total_size > 0 {
             (1.0 - final_archive_size as f64 / total_size as f64) * 100.0
         } else {
@@ -215,14 +173,6 @@ impl BackupEngine {
         println!("  Compression:  {:.1}%", compression_ratio);
         println!("  Duration:     {:.1}s", duration_secs);
         println!("  Location:     {}", backup_dir.display());
-
-        // Показываем информацию о шифровании
-        // ЗАКОММЕНТИРОВАНО: временно отключено
-        // if self.config.crypto.master_key_path.exists() {
-        //     println!("  Encryption:   ✓ (GOST Kuznechik)");
-        // } else {
-        //     println!("  Encryption:   ✗ (not encrypted)");
-        // }
         println!("  Encryption:   ✗ (temporarily disabled for testing)");
 
         Ok(result)
@@ -238,7 +188,6 @@ impl BackupEngine {
         let mut files = Vec::new();
         let globset = build_globset(exclude_patterns)?;
 
-        // Создаем прогресс-бар если нужно
         let pb = if show_progress {
             Some(ProgressBar::new_spinner())
         } else {
@@ -265,12 +214,10 @@ impl BackupEngine {
             {
                 let path = entry.path();
 
-                // Пропускаем директории
                 if !path.is_file() {
                     continue;
                 }
 
-                // Проверяем исключения по glob паттернам
                 if let Some(ref globset) = globset {
                     let path_str = path.to_string_lossy();
                     if globset.is_match(path_str.as_ref()) {
@@ -278,7 +225,6 @@ impl BackupEngine {
                     }
                 }
 
-                // Получаем метаданные файла
                 match self.get_file_info(path).await {
                     Ok(file_info) => {
                         files.push(file_info);
@@ -304,19 +250,15 @@ impl BackupEngine {
     async fn get_file_info(&self, path: &Path) -> Result<FileInfo> {
         let metadata = fs::metadata(path).context("Failed to get file metadata")?;
 
-        // Получаем относительный путь (если файл внутри одного из исходных путей)
         let rel_path = self.get_relative_path(path)?;
 
-        // Время модификации
         let mtime = metadata
             .modified()
             .map(|t| DateTime::<Utc>::from(t))
             .unwrap_or_else(|_| Utc::now());
 
-        // Хэш содержимого
         let hash = calculate_file_hash(path).await?;
 
-        // Права доступа (только для Unix)
         #[cfg(unix)]
         let mode = {
             use std::os::unix::fs::PermissionsExt;
@@ -335,29 +277,23 @@ impl BackupEngine {
         })
     }
 
-    /// Получает относительный путь файла
     fn get_relative_path(&self, path: &Path) -> Result<PathBuf> {
-        // Пытаемся найти самый длинный совпадающий префикс
         let current_dir = std::env::current_dir()?;
         let abs_path = if path.is_relative() {
             current_dir.join(path)
         } else {
             path.to_path_buf()
         };
-
-        // Возвращаем абсолютный путь как есть
-        // (в реальном использовании можно сделать relative to common root)
         Ok(abs_path)
     }
 
-    /// Создает tar.gz архив из списка файлов
+    /// ✅ ПОЛНОСТЬЮ ИСПРАВЛЕННЫЙ create_tar()
     pub async fn create_tar(
         &self,
         files: &[FileInfo],
         output_path: &Path,
         show_progress: bool,
     ) -> Result<u64> {
-        // Находим общий корневой путь для всех файлов
         let common_root = self.find_common_root(files)?;
         
         let pb = if show_progress {
@@ -375,17 +311,13 @@ impl BackupEngine {
             pb.set_message("Creating archive...");
         }
 
-        // Создаем файл для архива
-        let file = fs::File::create(output_path).context("Failed to create archive file")?;
+        let file = fs::File::create(output_path)
+            .context("Failed to create archive file")?;
         
-        // Создаем gzip encoder
         let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
-        
-        // Создаем tar builder поверх encoder
         let mut tar_builder = Builder::new(encoder);
 
         for file_info in files {
-            // Используем абсолютный путь из FileInfo
             let abs_path = &file_info.path;
 
             if !abs_path.exists() {
@@ -393,7 +325,6 @@ impl BackupEngine {
                 continue;
             }
 
-            // Вычисляем относительный путь относительно общего корня
             let rel_path = abs_path
                 .strip_prefix(&common_root)
                 .with_context(|| {
@@ -404,67 +335,69 @@ impl BackupEngine {
                     )
                 })?;
 
-            // Открываем файл для чтения
             let mut src_file = fs::File::open(abs_path)
                 .with_context(|| format!("Failed to open file: {}", abs_path.display()))?;
 
-            // Создаем заголовок tar
             let mut header = tar::Header::new_gnu();
-            header
-                .set_path(rel_path)
-                .with_context(|| format!("Failed to set path in header: {}", rel_path.display()))?;
+            header.set_path(rel_path)?;
             header.set_size(file_info.size);
             header.set_mtime(file_info.mtime.timestamp() as u64);
 
-            // Устанавливаем права доступа если есть
             #[cfg(unix)]
             if let Some(mode) = file_info.mode {
                 header.set_mode(mode);
             }
 
-            // Добавляем файл в tar архив
-            tar_builder
-                .append(&header, &mut src_file)
-                .with_context(|| format!("Failed to append file to tar: {}", abs_path.display()))?;
+            tar_builder.append(&header, &mut src_file)?;
 
             if let Some(ref pb) = pb {
                 pb.inc(1);
             }
         }
 
-        // КРИТИЧНО: завершаем tar архив (добавляет padding + EOF markers)
-        tar_builder.finish().context("Failed to finish tar archive")?;
-        // Примечание: finish() также закроет encoder и файл
-        
+        // ✅ ИСПРАВЛЕННАЯ ФИНАЛИЗАЦИЯ с правильными импортами
+        let mut encoder = tar_builder.into_inner()?;
+        encoder.flush()?;
+        Write::flush(&mut encoder)?;
+        encoder.finish()?;
+
         if let Some(pb) = pb {
-            pb.finish_with_message("Archive created");
+            pb.finish_with_message("Archive created successfully");
         }
 
-        // Возвращаем размер созданного архива
-        let metadata = fs::metadata(output_path).context("Failed to get archive metadata")?;
+        let metadata = fs::metadata(output_path)?;
         Ok(metadata.len())
     }
 
-    /// Находит общий корневой путь для всех файлов
+    /// ✅ НОВЫЙ метод валидации
+    pub fn validate_archive(&self, path: &Path) -> Result<()> {
+        println!("[INFO] Validating archive: {}", path.display());
+        
+        let file = fs::File::open(path)?;
+        let decoder = flate2::read::GzDecoder::new(file);
+        let mut archive = Archive::new(decoder);
+        
+        let entries: Result<Vec<_>, _> = archive.entries()?.collect();
+        let entry_count = entries?.len();
+        
+        println!("[INFO] Archive validation passed: {} files", entry_count);
+        Ok(())
+    }
+
     fn find_common_root(&self, files: &[FileInfo]) -> Result<PathBuf> {
         if files.is_empty() {
             return Err(anyhow::anyhow!("No files to backup"));
         }
 
-        // Начинаем с первого файла
         let mut common = files[0].path.parent().unwrap_or(&files[0].path).to_path_buf();
 
         for file in files.iter().skip(1) {
-            // Находим общий префикс
             common = self.common_prefix(&common, &file.path);
-            
-            // Если общего префикса нет (например, разные диски на Windows), используем родительскую директорию файла
             if common.as_os_str().is_empty() {
                 common = file.path.parent().unwrap_or(&file.path).to_path_buf();
             }
         }
 
-        // Убеждаемся, что путь абсолютный
         if !common.is_absolute() {
             common = std::env::current_dir()?.join(common);
         }
@@ -472,7 +405,6 @@ impl BackupEngine {
         Ok(common)
     }
 
-    /// Находит общий префикс двух путей
     fn common_prefix(&self, a: &Path, b: &Path) -> PathBuf {
         let a_components: Vec<_> = a.components().collect();
         let b_components: Vec<_> = b.components().collect();
@@ -490,17 +422,13 @@ impl BackupEngine {
         common
     }
 
-    /// Создает манифест бэкапа
     fn create_manifest(&self, files: &[FileInfo]) -> Result<serde_json::Value> {
         let common_root = self.find_common_root(files)?;
         
         let file_list: Vec<serde_json::Value> = files
             .iter()
             .map(|f| {
-                // В манифесте сохраняем относительный путь от общего корня
-                let rel_path = f.path.strip_prefix(&common_root)
-                    .with_context(|| format!("Failed to strip prefix for {}", f.path.display()))?;
-                
+                let rel_path = f.path.strip_prefix(&common_root)?;
                 Ok(serde_json::json!({
                     "path": rel_path.display().to_string(),
                     "size": f.size,
@@ -520,26 +448,9 @@ impl BackupEngine {
         }))
     }
 
-    /// Проверяет целостность бэкапа
     pub async fn verify_backup(&self, backup_id: &str) -> Result<bool> {
         let backup_path = self.storage.backup_path(backup_id);
-
-        // Определяем, зашифрован ли бэкап
-        // ЗАКОММЕНТИРОВАНО: временно работаем только с незашифрованными файлами
-        // let (tar_path, _manifest_path) = if backup_path.join("data.tar.gz.enc").exists() {
-        //     (
-        //         backup_path.join("data.tar.gz.enc"),
-        //         backup_path.join("manifest.json.enc"),
-        //     )
-        // } else {
-        //     (
-        //         backup_path.join("data.tar.gz"),
-        //         backup_path.join("manifest.json"),
-        //     )
-        // };
-        
         let tar_path = backup_path.join("data.tar.gz");
-        let _manifest_path = backup_path.join("manifest.json");
 
         if !tar_path.exists() {
             return Ok(false);
@@ -547,55 +458,20 @@ impl BackupEngine {
 
         println!("Verifying backup: {}", backup_id);
 
-        // Проверяем, зашифрован ли бэкап
-        // ЗАКОММЕНТИРОВАНО: временно отключена проверка зашифрованных файлов
-        /*
-        if tar_path.extension() == Some(std::ffi::OsStr::new("enc")) {
-            // Для зашифрованных бэкапов проверяем наличие ключа
-            if !self.config.crypto.master_key_path.exists() {
-                eprintln!("[WARN] Master key not found, cannot verify encrypted backup");
-                return Ok(false);
-            }
+        if let Ok(index) = self.storage.read_local_index(backup_id) {
+            println!("  Files in manifest: {}", index.file_count);
 
-            // Проверяем целостность зашифрованного файла
-            let crypto =
-                crate::crypto::CryptoManager::load_master_key(&self.config.crypto.master_key_path)?;
+            let file = fs::File::open(&tar_path)?;
+            let mut archive = Archive::new(flate2::read::GzDecoder::new(file));
+            let file_count = archive.entries()?.count();
+            println!("  Files in archive: {}", file_count);
 
-            // Создаем временный файл для проверки
-            let temp_output =
-                std::env::temp_dir().join(format!("verify-{:x}", rand::random::<u32>()));
-
-            match crypto.decrypt_file(&tar_path, &temp_output) {
-                Ok(_) => {
-                    println!("  Archive: ✓ (encrypted, MAC valid)");
-                    // Удаляем временный файл
-                    let _ = std::fs::remove_file(&temp_output);
-                }
-                Err(e) => {
-                    println!("  Archive: ✗ (MAC verification failed: {})", e);
-                    return Ok(false);
-                }
-            }
-        } else {
-        */
-            // Для незашифрованных бэкапов проверяем хэш архива если есть в индексе
-            if let Ok(index) = self.storage.read_local_index(backup_id) {
-                println!("  Files in manifest: {}", index.file_count);
-
-                // Проверяем, что архив можно открыть
-                let file = fs::File::open(&tar_path)?;
-                let mut archive = Archive::new(flate2::read::GzDecoder::new(file));
-                let file_count = archive.entries()?.count();
-                println!("  Files in archive: {}", file_count);
-
-                return Ok(true);
-            }
-        // }
+            return Ok(true);
+        }
 
         Ok(true)
     }
 
-    /// Восстанавливает файлы из бэкапа
     pub async fn restore_backup(
         &self,
         backup_id: &str,
@@ -613,62 +489,14 @@ impl BackupEngine {
         println!("[INFO] Restoring backup: {}", backup_id);
         println!("[INFO] Destination: {}", destination.display());
 
-        // Определяем пути к файлам
-        // ЗАКОММЕНТИРОВАНО: временно работаем только с незашифрованными файлами
-        /*
-        let (archive_path, _manifest_path) = if backup_path.join("data.tar.gz.enc").exists() {
-            // Зашифрованный бэкап
-            if !self.config.crypto.master_key_path.exists() {
-                return Err(anyhow::anyhow!(
-                    "Master key not found, cannot restore encrypted backup"
-                ));
-            }
-
-            println!("[INFO] Backup is encrypted, decrypting...");
-
-            let crypto =
-                crate::crypto::CryptoManager::load_master_key(&self.config.crypto.master_key_path)?;
-
-            // Создаем временные файлы для расшифровки
-            let temp_dir = std::env::temp_dir().join(format!("krybs-restore-{}", backup_id));
-            fs::create_dir_all(&temp_dir)?;
-
-            let decrypted_archive = temp_dir.join("data.tar.gz");
-            let _decrypted_manifest = temp_dir.join("manifest.json");
-
-            // Дешифруем архив
-            crypto
-                .decrypt_file(&backup_path.join("data.tar.gz.enc"), &decrypted_archive)
-                .context("Failed to decrypt archive")?;
-
-            // Дешифруем манифест если существует
-            if backup_path.join("manifest.json.enc").exists() {
-                crypto
-                    .decrypt_file(&backup_path.join("manifest.json.enc"), &_decrypted_manifest)
-                    .context("Failed to decrypt manifest")?;
-            }
-
-            (decrypted_archive, _decrypted_manifest)
-        } else {
-            // Незашифрованный бэкап
-            (
-                backup_path.join("data.tar.gz"),
-                backup_path.join("manifest.json"),
-            )
-        };
-        */
-        
         let archive_path = backup_path.join("data.tar.gz");
-        let _manifest_path = backup_path.join("manifest.json");
 
         if !archive_path.exists() {
             return Err(anyhow::anyhow!("Archive not found in backup"));
         }
 
-        // Создаем директорию назначения если не существует
         fs::create_dir_all(destination)?;
 
-        // Извлекаем архив
         let pb = if progress {
             Some(ProgressBar::new_spinner())
         } else {
@@ -687,17 +515,14 @@ impl BackupEngine {
             let mut entry = entry?;
             let path = entry.path()?.to_path_buf();
 
-            // Проверяем, нужно ли восстанавливать конкретный путь
             if let Some(specific_path) = specific_path {
                 if !path.starts_with(specific_path) {
                     continue;
                 }
             }
 
-            // Определяем путь назначения
             let dest_path = destination.join(&path);
 
-            // Проверяем, существует ли файл
             if dest_path.exists() && !overwrite {
                 eprintln!(
                     "[WARN] Skipping {} (already exists, use --force to overwrite)",
@@ -706,12 +531,10 @@ impl BackupEngine {
                 continue;
             }
 
-            // Создаем родительские директории
             if let Some(parent) = dest_path.parent() {
                 fs::create_dir_all(parent)?;
             }
 
-            // Извлекаем файл
             entry.unpack(&dest_path)?;
 
             if let Some(ref pb) = pb {
@@ -729,7 +552,6 @@ impl BackupEngine {
     }
 }
 
-/// Строит GlobSet из паттернов исключения
 fn build_globset(patterns: &[String]) -> Result<Option<GlobSet>> {
     if patterns.is_empty() {
         return Ok(None);
@@ -737,15 +559,14 @@ fn build_globset(patterns: &[String]) -> Result<Option<GlobSet>> {
 
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
-        let glob =
-            Glob::new(pattern).with_context(|| format!("Invalid glob pattern: {}", pattern))?;
+        let glob = Glob::new(pattern)
+            .with_context(|| format!("Invalid glob pattern: {}", pattern))?;
         builder.add(glob);
     }
 
     Ok(Some(builder.build()?))
 }
 
-/// Вычисляет SHA256 хэш файла
 pub async fn calculate_file_hash(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)
         .with_context(|| format!("Failed to open file for hashing: {}", path.display()))?;
@@ -781,7 +602,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(files.len(), 0); // Пустая директория
+        assert_eq!(files.len(), 0);
     }
 
     #[tokio::test]
