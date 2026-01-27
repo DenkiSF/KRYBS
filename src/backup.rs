@@ -375,10 +375,8 @@ impl BackupEngine {
             pb.set_message("Creating archive...");
         }
 
-        // Создаем архив
-        let tar_gz = fs::File::create(output_path).context("Failed to create archive file")?;
-        let enc = flate2::write::GzEncoder::new(tar_gz, flate2::Compression::default());
-        let mut tar = Builder::new(enc);
+        // Создаем tar-архив в памяти
+        let mut tar_builder = Builder::new(Vec::new());
 
         for file_info in files {
             // Используем абсолютный путь из FileInfo
@@ -418,26 +416,35 @@ impl BackupEngine {
                 header.set_mode(mode);
             }
 
-            // Записываем заголовок и содержимое
-            tar.append(&header, &mut file)
-                .with_context(|| format!("Failed to append file to archive: {}", abs_path.display()))?;
+            // Добавляем файл в tar-архив
+            tar_builder
+                .append(&header, &mut file)
+                .with_context(|| format!("Failed to append file to tar: {}", abs_path.display()))?;
 
             if let Some(ref pb) = pb {
                 pb.inc(1);
             }
         }
 
-        // Завершаем создание архива
-        tar.finish().context("Failed to finish tar archive")?;
+        // Завершаем создание tar-архива и получаем сырые данные
+        let tar_data = tar_builder
+            .into_inner()
+            .context("Failed to finalize tar archive")?;
+
+        // Сжимаем tar-данные с помощью gzip
+        let mut gz_encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::copy(&mut std::io::Cursor::new(&tar_data), &mut gz_encoder)
+            .context("Failed to compress tar data")?;
+        let gz_data = gz_encoder.finish().context("Failed to finish gzip compression")?;
+
+        // Записываем сжатые данные в файл
+        fs::write(output_path, &gz_data).context("Failed to write archive file")?;
 
         if let Some(pb) = pb {
             pb.finish_with_message("Archive created");
         }
 
-        // Возвращаем размер архива
-        let metadata = fs::metadata(output_path).context("Failed to get archive metadata")?;
-
-        Ok(metadata.len())
+        Ok(gz_data.len() as u64)
     }
 
     /// Находит общий корневой путь для всех файлов
