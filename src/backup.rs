@@ -16,7 +16,7 @@ use crate::storage::{BackupInfo, BackupStorage, BackupType};
 
 #[derive(Debug, Clone)]
 pub struct FileInfo {
-    pub path: PathBuf,        // Относительный путь внутри архива
+    pub path: PathBuf,        // Абсолютный путь к файлу
     pub size: u64,            // Размер в байтах
     pub mtime: DateTime<Utc>, // Время последней модификации
     pub hash: String,         // SHA256 хэш содержимого
@@ -357,6 +357,9 @@ impl BackupEngine {
         output_path: &Path,
         show_progress: bool,
     ) -> Result<u64> {
+        // Находим общий корневой путь для всех файлов
+        let common_root = self.find_common_root(files)?;
+        
         let pb = if show_progress {
             Some(ProgressBar::new(files.len() as u64))
         } else {
@@ -378,22 +381,34 @@ impl BackupEngine {
         let mut tar = Builder::new(enc);
 
         for file_info in files {
-            let path = &file_info.path;
+            // Используем абсолютный путь из FileInfo
+            let abs_path = &file_info.path;
 
-            if !path.exists() {
-                eprintln!("[WARN] File no longer exists: {}", path.display());
+            if !abs_path.exists() {
+                eprintln!("[WARN] File no longer exists: {}", abs_path.display());
                 continue;
             }
 
+            // Вычисляем относительный путь относительно общего корня
+            let rel_path = abs_path
+                .strip_prefix(&common_root)
+                .with_context(|| {
+                    format!(
+                        "Failed to get relative path for {} (root: {})",
+                        abs_path.display(),
+                        common_root.display()
+                    )
+                })?;
+
             // Добавляем файл в архив
-            let mut file = fs::File::open(path)
-                .with_context(|| format!("Failed to open file: {}", path.display()))?;
+            let mut file = fs::File::open(abs_path)
+                .with_context(|| format!("Failed to open file: {}", abs_path.display()))?;
 
             // Создаем заголовок tar
             let mut header = tar::Header::new_gnu();
             header
-                .set_path(path)
-                .with_context(|| format!("Failed to set path in header: {}", path.display()))?;
+                .set_path(rel_path)
+                .with_context(|| format!("Failed to set path in header: {}", rel_path.display()))?;
             header.set_size(file_info.size);
             header.set_mtime(file_info.mtime.timestamp() as u64);
 
@@ -405,7 +420,7 @@ impl BackupEngine {
 
             // Записываем заголовок и содержимое
             tar.append(&header, &mut file)
-                .with_context(|| format!("Failed to append file to archive: {}", path.display()))?;
+                .with_context(|| format!("Failed to append file to archive: {}", abs_path.display()))?;
 
             if let Some(ref pb) = pb {
                 pb.inc(1);
@@ -425,20 +440,71 @@ impl BackupEngine {
         Ok(metadata.len())
     }
 
+    /// Находит общий корневой путь для всех файлов
+    fn find_common_root(&self, files: &[FileInfo]) -> Result<PathBuf> {
+        if files.is_empty() {
+            return Err(anyhow::anyhow!("No files to backup"));
+        }
+
+        // Начинаем с первого файла
+        let mut common = files[0].path.parent().unwrap_or(&files[0].path).to_path_buf();
+
+        for file in files.iter().skip(1) {
+            // Находим общий префикс
+            common = self.common_prefix(&common, &file.path);
+            
+            // Если общего префикса нет (например, разные диски на Windows), используем родительскую директорию файла
+            if common.as_os_str().is_empty() {
+                common = file.path.parent().unwrap_or(&file.path).to_path_buf();
+            }
+        }
+
+        // Убеждаемся, что путь абсолютный
+        if !common.is_absolute() {
+            common = std::env::current_dir()?.join(common);
+        }
+
+        Ok(common)
+    }
+
+    /// Находит общий префикс двух путей
+    fn common_prefix(&self, a: &Path, b: &Path) -> PathBuf {
+        let a_components: Vec<_> = a.components().collect();
+        let b_components: Vec<_> = b.components().collect();
+        
+        let mut common = PathBuf::new();
+        
+        for (a_comp, b_comp) in a_components.iter().zip(b_components.iter()) {
+            if a_comp == b_comp {
+                common.push(a_comp);
+            } else {
+                break;
+            }
+        }
+        
+        common
+    }
+
     /// Создает манифест бэкапа
     fn create_manifest(&self, files: &[FileInfo]) -> Result<serde_json::Value> {
+        let common_root = self.find_common_root(files)?;
+        
         let file_list: Vec<serde_json::Value> = files
             .iter()
             .map(|f| {
-                serde_json::json!({
-                    "path": f.path.display().to_string(),
+                // В манифесте сохраняем относительный путь от общего корня
+                let rel_path = f.path.strip_prefix(&common_root)
+                    .with_context(|| format!("Failed to strip prefix for {}", f.path.display()))?;
+                
+                Ok(serde_json::json!({
+                    "path": rel_path.display().to_string(),
                     "size": f.size,
                     "mtime": f.mtime.to_rfc3339(),
                     "hash": f.hash,
                     "mode": f.mode,
-                })
+                }))
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         Ok(serde_json::json!({
             "backup_type": "full",
