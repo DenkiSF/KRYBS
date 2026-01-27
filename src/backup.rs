@@ -375,8 +375,14 @@ impl BackupEngine {
             pb.set_message("Creating archive...");
         }
 
-        // Создаем tar-архив в памяти
-        let mut tar_builder = Builder::new(Vec::new());
+        // Создаем файл для архива
+        let file = fs::File::create(output_path).context("Failed to create archive file")?;
+        
+        // Создаем gzip encoder
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        
+        // Создаем tar builder поверх encoder
+        let mut tar_builder = Builder::new(encoder);
 
         for file_info in files {
             // Используем абсолютный путь из FileInfo
@@ -398,8 +404,8 @@ impl BackupEngine {
                     )
                 })?;
 
-            // Добавляем файл в архив
-            let mut file = fs::File::open(abs_path)
+            // Открываем файл для чтения
+            let mut src_file = fs::File::open(abs_path)
                 .with_context(|| format!("Failed to open file: {}", abs_path.display()))?;
 
             // Создаем заголовок tar
@@ -416,9 +422,9 @@ impl BackupEngine {
                 header.set_mode(mode);
             }
 
-            // Добавляем файл в tar-архив
+            // Добавляем файл в tar архив
             tar_builder
-                .append(&header, &mut file)
+                .append(&header, &mut src_file)
                 .with_context(|| format!("Failed to append file to tar: {}", abs_path.display()))?;
 
             if let Some(ref pb) = pb {
@@ -426,25 +432,17 @@ impl BackupEngine {
             }
         }
 
-        // Завершаем создание tar-архива и получаем сырые данные
-        let tar_data = tar_builder
-            .into_inner()
-            .context("Failed to finalize tar archive")?;
-
-        // Сжимаем tar-данные с помощью gzip
-        let mut gz_encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        std::io::copy(&mut std::io::Cursor::new(&tar_data), &mut gz_encoder)
-            .context("Failed to compress tar data")?;
-        let gz_data = gz_encoder.finish().context("Failed to finish gzip compression")?;
-
-        // Записываем сжатые данные в файл
-        fs::write(output_path, &gz_data).context("Failed to write archive file")?;
-
+        // КРИТИЧНО: завершаем tar архив (добавляет padding + EOF markers)
+        tar_builder.finish().context("Failed to finish tar archive")?;
+        // Примечание: finish() также закроет encoder и файл
+        
         if let Some(pb) = pb {
             pb.finish_with_message("Archive created");
         }
 
-        Ok(gz_data.len() as u64)
+        // Возвращаем размер созданного архива
+        let metadata = fs::metadata(output_path).context("Failed to get archive metadata")?;
+        Ok(metadata.len())
     }
 
     /// Находит общий корневой путь для всех файлов
