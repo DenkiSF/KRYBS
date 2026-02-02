@@ -186,7 +186,7 @@ pub enum Commands {
 
         /// Rollback specific profile only
         #[arg(long)]
-        profile: Option<String>,
+        profile_filter: Option<String>,
     },
 
     /// List available backups
@@ -207,7 +207,7 @@ pub enum Commands {
 
         /// Filter by profile
         #[arg(long)]
-        profile: Option<String>,
+        profile_filter: Option<String>,
 
         /// Show only full backups
         #[arg(long)]
@@ -268,7 +268,7 @@ pub enum Commands {
 
         /// Verify specific profile only
         #[arg(long)]
-        profile: Option<String>,
+        profile_filter: Option<String>,
 
         /// Show verification progress
         #[arg(long)]
@@ -297,7 +297,7 @@ pub enum Commands {
 
         /// Cleanup specific profile only
         #[arg(long)]
-        profile: Option<String>,
+        profile_filter: Option<String>,
 
         /// Remove corrupted backups
         #[arg(long)]
@@ -363,7 +363,7 @@ pub enum Commands {
 
         /// Rotate specific profile only
         #[arg(long)]
-        profile: Option<String>,
+        profile_filter: Option<String>,
 
         /// Dry run mode
         #[arg(long)]
@@ -520,17 +520,6 @@ impl Cli {
                     .unwrap_or(&config.core.backup_dir);
 
                 // ЗАКОММЕНТИРОВАНО: временно отключаем проверку мастер-ключа
-                /*
-                // Проверяем наличие мастер-ключа
-                if config.crypto.master_key_path.exists() {
-                    println!(
-                        "[INFO] Master key found: {}",
-                        config.crypto.master_key_path.display()
-                    );
-                } else {
-                    println!("[WARN] Master key not found, backups will not be encrypted");
-                }
-                */
                 println!("[INFO] Encryption is temporarily disabled for testing");
 
                 // Создаем хранилище и движок снепшотов
@@ -614,18 +603,6 @@ impl Cli {
                 let config =
                     crate::config::Config::load(global.config.as_deref()).unwrap_or_default();
 
-                // ЗАКОММЕНТИРОВАНО: временно отключаем проверку мастер-ключа
-                /*
-                // Проверяем наличие мастер-ключа
-                if config.crypto.master_key_path.exists() {
-                    println!(
-                        "[INFO] Master key found: {}",
-                        config.crypto.master_key_path.display()
-                    );
-                } else {
-                    println!("[WARN] Master key not found, backup will not be encrypted");
-                }
-                */
                 println!("[INFO] Encryption is temporarily disabled for testing");
 
                 // Определяем директорию для бэкапа (CLI имеет приоритет)
@@ -769,7 +746,7 @@ impl Cli {
                 target,
                 dry_run,
                 create_backup,
-                profile,
+                profile_filter,
             } => {
                 println!("KRYBS {} command 'rollback' called", super::VERSION);
                 println!("Rolling back to version: {}", target);
@@ -780,8 +757,8 @@ impl Cli {
                 if *create_backup {
                     println!("Creating backup before rollback");
                 }
-                if let Some(profile) = profile {
-                    println!("Profile filter: {}", profile);
+                if let Some(profile_filter) = profile_filter {
+                    println!("Profile filter: {}", profile_filter);
                 }
 
                 Ok(())
@@ -791,7 +768,7 @@ impl Cli {
                 global,
                 details,
                 limit,
-                profile,
+                profile_filter,
                 full_only,
                 snapshots_only,
                 sort: _,
@@ -819,7 +796,7 @@ impl Cli {
                                     }
                                 }
 
-                                if let Some(filter_profile) = profile {
+                                if let Some(filter_profile) = profile_filter {
                                     if &backup.profile != filter_profile {
                                         continue;
                                     }
@@ -841,7 +818,7 @@ impl Cli {
                             for chain in chains.values() {
                                 for backup in chain.iter().skip(1) {
                                     // Пропускаем первый (full)
-                                    if let Some(filter_profile) = profile {
+                                    if let Some(filter_profile) = profile_filter {
                                         if &backup.profile != filter_profile {
                                             continue;
                                         }
@@ -871,7 +848,7 @@ impl Cli {
                             for (chain_id, chain) in chains {
                                 println!("\nChain: {}", chain_id);
                                 for backup in chain {
-                                    if let Some(filter_profile) = profile {
+                                    if let Some(filter_profile) = profile_filter {
                                         if &backup.profile != filter_profile {
                                             continue;
                                         }
@@ -902,20 +879,6 @@ impl Cli {
                         if !*summary {
                             println!("Configuration:");
                             println!("  Backup directory: {}", config.core.backup_dir.display());
-                            // ЗАКОММЕНТИРОВАНО: временно не показываем информацию о криптографии
-                            // println!(
-                            //     "  Master key path: {}",
-                            //     config.crypto.master_key_path.display()
-                            // );
-
-                            // // Проверяем наличие мастер-ключа
-                            // if config.crypto.master_key_path.exists() {
-                            //     println!("  Master key: ✓ present");
-                            // } else {
-                            //     println!("  Master key: ✗ missing");
-                            // }
-
-                            // println!("  Delete plaintext: {}", config.crypto.delete_plain);
                             println!("  Encryption: ✗ (temporarily disabled for testing)");
                             println!("  Profiles configured: {}", config.profiles.len());
                         }
@@ -966,18 +929,6 @@ impl Cli {
                 let config =
                     crate::config::Config::load(global.config.as_deref()).unwrap_or_default();
 
-                // ЗАКОММЕНТИРОВАНО: временно отключаем проверку мастер-ключа
-                /*
-                // Проверяем наличие мастер-ключа
-                if config.crypto.master_key_path.exists() {
-                    println!(
-                        "[INFO] Master key found: {}",
-                        config.crypto.master_key_path.display()
-                    );
-                } else {
-                    println!("[WARN] Master key not found, snapshot will not be encrypted");
-                }
-                */
                 println!("[INFO] Encryption is temporarily disabled for testing");
 
                 // Определяем директорию для бэкапа
@@ -1061,7 +1012,7 @@ impl Cli {
                 backup_id,
                 quick,
                 repair,
-                profile,
+                profile_filter,
                 progress,
             } => {
                 println!("KRYBS {} command 'verify' called", super::VERSION);
@@ -1078,8 +1029,8 @@ impl Cli {
                 if *repair {
                     println!("Repair mode enabled");
                 }
-                if let Some(profile) = profile {
-                    println!("Profile filter: {}", profile);
+                if let Some(profile_filter) = profile_filter {
+                    println!("Profile filter: {}", profile_filter);
                 }
                 if *progress {
                     println!("Progress display enabled");
@@ -1093,7 +1044,7 @@ impl Cli {
                 keep_last,
                 max_age,
                 dry_run,
-                profile,
+                profile_filter,
                 remove_corrupted,
                 force,
             } => {
@@ -1108,8 +1059,8 @@ impl Cli {
                 if *dry_run {
                     println!("DRY RUN - no backups will be deleted");
                 }
-                if let Some(profile) = profile {
-                    println!("Profile filter: {}", profile);
+                if let Some(profile_filter) = profile_filter {
+                    println!("Profile filter: {}", profile_filter);
                 }
                 if *remove_corrupted {
                     println!("Will remove corrupted backups");
@@ -1141,7 +1092,7 @@ impl Cli {
                 new_key: _,
                 reencrypt: _,
                 keep_old: _,
-                profile: _,
+                profile_filter: _,
                 dry_run: _,
             } => {
                 println!("KRYBS {} command 'key-rotate' called", super::VERSION);
@@ -1239,11 +1190,6 @@ impl Cli {
     fn display_backup(&self, backup: &crate::storage::BackupInfo, details: bool) {
         let parent_info = backup.parent_id.as_deref().unwrap_or("none");
 
-        // Проверяем, зашифрован ли бэкап
-        let _backup_path = crate::storage::BackupStorage::new("").backup_path(&backup.id);
-        // ЗАКОММЕНТИРОВАНО: временно считаем все бэкапы незашифрованными
-        // let is_encrypted = backup_path.join("data.tar.gz.enc").exists();
-        // let encryption_status = if is_encrypted { "🔒" } else { "🔓" };
         let encryption_status = "🔓"; // Все бэкапы незашифрованы при тестировании
 
         if details {
@@ -1287,38 +1233,6 @@ impl Cli {
             for backup in chain {
                 let backup_path = storage.backup_path(&backup.id);
 
-                // Проверяем, зашифрован ли бэкап
-                // ЗАКОММЕНТИРОВАНО: временно проверяем только незашифрованные файлы
-                /*
-                if backup_path.join("data.tar.gz.enc").exists() {
-                    // Зашифрованный бэкап
-                    if !config.crypto.master_key_path.exists() {
-                        print!("NO KEY ");
-                        chain_ok = false;
-                        continue;
-                    }
-
-                    // Пробуем дешифровать для проверки
-                    let crypto = crate::crypto::CryptoManager::load_master_key(
-                        &config.crypto.master_key_path,
-                    )?;
-                    let temp_file = std::env::temp_dir().join(format!(
-                        "verify-{}-{:x}",
-                        backup.id,
-                        rand::random::<u32>()
-                    ));
-
-                    match crypto.decrypt_file(&backup_path.join("data.tar.gz.enc"), &temp_file) {
-                        Ok(_) => {
-                            let _ = std::fs::remove_file(&temp_file);
-                        }
-                        Err(e) => {
-                            print!("ERROR:{} ", e);
-                            chain_ok = false;
-                        }
-                    }
-                } else if backup_path.join("data.tar.gz").exists() {
-                */
                 if backup_path.join("data.tar.gz").exists() {
                     // Незашифрованный бэкап
                     if !storage.verify_backup(&backup.id)? {
@@ -1365,11 +1279,6 @@ impl Cli {
         // Показываем последние 10
         let limit = 10.min(all_backups.len());
         for backup in all_backups.iter().take(limit) {
-            // Проверяем, зашифрован ли бэкап
-            let _backup_path = storage.backup_path(&backup.id);
-            // ЗАКОММЕНТИРОВАНО: временно считаем все бэкапы незашифрованными
-            // let is_encrypted = backup_path.join("data.tar.gz.enc").exists();
-            // let encryption_status = if is_encrypted { "🔒" } else { "🔓" };
             let encryption_status = "🔓";
 
             println!(

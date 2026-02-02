@@ -5,7 +5,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{Read, Write};  // ✅ ИСПРАВЛЕНО: добавлен Write trait
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tar::{Archive, Builder};
@@ -115,7 +115,7 @@ impl BackupEngine {
 
         let archive_size = self.create_tar(&files, &tar_path, progress).await?;
 
-        // ✅ НОВОЕ: Валидация архива после создания
+        // ✅ ИСПРАВЛЕННАЯ валидация архива после создания
         self.validate_archive(&tar_path)?;
 
         // Шаг 4: Создание манифеста
@@ -287,7 +287,7 @@ impl BackupEngine {
         Ok(abs_path)
     }
 
-    /// ✅ ПОЛНОСТЬЮ ИСПРАВЛЕННЫЙ create_tar()
+    /// ✅ ИСПРАВЛЕННЫЙ create_tar() - теперь работает правильно
     pub async fn create_tar(
         &self,
         files: &[FileInfo],
@@ -338,28 +338,21 @@ impl BackupEngine {
             let mut src_file = fs::File::open(abs_path)
                 .with_context(|| format!("Failed to open file: {}", abs_path.display()))?;
 
-            let mut header = tar::Header::new_gnu();
-            header.set_path(rel_path)?;
-            header.set_size(file_info.size);
-            header.set_mtime(file_info.mtime.timestamp() as u64);
-
-            #[cfg(unix)]
-            if let Some(mode) = file_info.mode {
-                header.set_mode(mode);
-            }
-
-            tar_builder.append(&header, &mut src_file)?;
+            // ✅ ИСПРАВЛЕНО: Используем более простой подход
+            // Вместо ручного создания заголовка, используем удобные методы Builder
+            tar_builder.append_file(rel_path, &mut src_file)
+                .with_context(|| format!("Failed to append file to archive: {}", abs_path.display()))?;
 
             if let Some(ref pb) = pb {
                 pb.inc(1);
             }
         }
 
-        // ✅ ИСПРАВЛЕННАЯ ФИНАЛИЗАЦИЯ с правильными импортами
-        let mut encoder = tar_builder.into_inner()?;
-        encoder.flush()?;
-        Write::flush(&mut encoder)?;
-        encoder.finish()?;
+        // ✅ ИСПРАВЛЕННАЯ ФИНАЛИЗАЦИЯ
+        tar_builder.into_inner()
+            .context("Failed to get inner encoder")?
+            .finish()
+            .context("Failed to finish compression")?;
 
         if let Some(pb) = pb {
             pb.finish_with_message("Archive created successfully");
@@ -369,7 +362,7 @@ impl BackupEngine {
         Ok(metadata.len())
     }
 
-    /// ✅ НОВЫЙ метод валидации
+    /// ✅ ИСПРАВЛЕННЫЙ метод валидации архива
     pub fn validate_archive(&self, path: &Path) -> Result<()> {
         println!("[INFO] Validating archive: {}", path.display());
         
@@ -377,10 +370,21 @@ impl BackupEngine {
         let decoder = flate2::read::GzDecoder::new(file);
         let mut archive = Archive::new(decoder);
         
-        let entries: Result<Vec<_>, _> = archive.entries()?.collect();
-        let entry_count = entries?.len();
+        // Просто читаем записи без попытки собрать в вектор
+        let mut count = 0;
+        for entry in archive.entries()? {
+            let entry = entry?;
+            let header = entry.header();
+            
+            // Проверяем что путь валиден
+            if header.path().is_err() {
+                return Err(anyhow::anyhow!("Invalid path in archive entry"));
+            }
+            
+            count += 1;
+        }
         
-        println!("[INFO] Archive validation passed: {} files", entry_count);
+        println!("[INFO] Archive validation passed: {} files", count);
         Ok(())
     }
 
@@ -623,5 +627,122 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, file_path);
         assert_eq!(files[0].size, 12);
+    }
+
+    #[tokio::test]
+    async fn test_calculate_file_hash() -> Result<()> {
+        let temp_dir = tempdir().unwrap();
+        let file_path = temp_dir.path().join("test.txt");
+        fs::write(&file_path, "test content")?;
+        
+        let hash = calculate_file_hash(&file_path).await?;
+        assert_eq!(hash.len(), 64); // SHA256 hex string length
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_file_info() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let file_path = temp_dir.path().join("test.txt");
+        let content = "Hello, World!";
+        fs::write(&file_path, content)?;
+        
+        let storage = BackupStorage::new(temp_dir.path().to_str().unwrap());
+        let config = Config::default();
+        let engine = BackupEngine::new(storage, config);
+
+        let file_info = engine.get_file_info(&file_path).await?;
+        
+        assert_eq!(file_info.path, file_path);
+        assert_eq!(file_info.size, content.len() as u64);
+        assert_eq!(file_info.hash.len(), 64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_globset() -> Result<()> {
+        let patterns = vec![
+            "*.tmp".to_string(),
+            "cache/*".to_string(),
+        ];
+        
+        let globset = build_globset(&patterns)?;
+        assert!(globset.is_some());
+        
+        let globset = globset.unwrap();
+        assert!(globset.is_match("test.tmp"));
+        assert!(globset.is_match("cache/file.txt"));
+        assert!(!globset.is_match("test.txt"));
+        
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_create_and_validate_archive() -> Result<()> {
+        let temp_dir = tempdir()?;
+        
+        // Создаем несколько тестовых файлов
+        let file1 = temp_dir.path().join("file1.txt");
+        let file2 = temp_dir.path().join("file2.txt");
+        fs::write(&file1, "content 1")?;
+        fs::write(&file2, "content 2")?;
+
+        let storage = BackupStorage::new(temp_dir.path().to_str().unwrap());
+        let config = Config::default();
+        let engine = BackupEngine::new(storage, config);
+
+        // Создаем FileInfo структуры
+        let files = vec![
+            FileInfo {
+                path: file1.clone(),
+                size: 9,
+                mtime: Utc::now(),
+                hash: calculate_file_hash(&file1).await?,
+                mode: None,
+            },
+            FileInfo {
+                path: file2.clone(),
+                size: 9,
+                mtime: Utc::now(),
+                hash: calculate_file_hash(&file2).await?,
+                mode: None,
+            },
+        ];
+
+        let archive_path = temp_dir.path().join("test.tar.gz");
+        let size = engine.create_tar(&files, &archive_path, false).await?;
+        
+        assert!(archive_path.exists());
+        assert!(size > 0);
+        
+        // Проверяем валидацию
+        engine.validate_archive(&archive_path)?;
+        
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scan_paths_with_exclude() -> Result<()> {
+        let temp_dir = tempdir()?;
+        
+        // Создаем тестовую структуру
+        let file1 = temp_dir.path().join("include.txt");
+        let file2 = temp_dir.path().join("exclude.tmp");
+        fs::write(&file1, "include")?;
+        fs::write(&file2, "exclude")?;
+
+        let storage = BackupStorage::new(temp_dir.path().to_str().unwrap());
+        let config = Config::default();
+        let engine = BackupEngine::new(storage, config);
+
+        let files = engine.scan_paths(
+            &[temp_dir.path().to_path_buf()],
+            &["*.tmp".to_string()],
+            false,
+        ).await?;
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path.file_name().unwrap(), "include.txt");
+        Ok(())
     }
 }

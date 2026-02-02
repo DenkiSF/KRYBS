@@ -451,3 +451,140 @@ fn human_to_bytes(human: &str) -> Option<u64> {
     // Если не нашли единицы измерения, пробуем просто число
     human.parse::<u64>().ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn test_bytes_to_human() {
+        assert_eq!(bytes_to_human(0), "0.00B");
+        assert_eq!(bytes_to_human(1024), "1.00KB");
+        assert_eq!(bytes_to_human(1024 * 1024), "1.00MB");
+        assert_eq!(bytes_to_human(1024 * 1024 * 1024), "1.00GB");
+        assert_eq!(bytes_to_human(1024 * 1024 * 1024 * 1024), "1.00TB");
+    }
+
+    #[test]
+    fn test_human_to_bytes() {
+        assert_eq!(human_to_bytes("1.00B"), Some(1));
+        assert_eq!(human_to_bytes("1.00KB"), Some(1024));
+        assert_eq!(human_to_bytes("1.00MB"), Some(1024 * 1024));
+        assert_eq!(human_to_bytes("1.50GB"), Some((1024 * 1024 * 1024) as u64 * 3 / 2));
+    }
+
+    #[test]
+    fn test_storage_init() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let storage = BackupStorage::new(temp_dir.path().to_str().unwrap());
+        
+        storage.init()?;
+        
+        assert!(temp_dir.path().join("full").exists());
+        assert!(temp_dir.path().join("snap").exists());
+        assert!(temp_dir.path().join("chains").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn test_backup_path() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let storage = BackupStorage::new(temp_dir.path().to_str().unwrap());
+        storage.init()?;
+        
+        let full_path = storage.backup_path("full-20240101-120000");
+        assert!(full_path.to_string_lossy().contains("full/full-20240101-120000"));
+        
+        let snap_path = storage.backup_path("snap-20240101-130000");
+        assert!(snap_path.to_string_lossy().contains("snap/snap-20240101-130000"));
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_generate_id() -> Result<()> {
+        let storage = BackupStorage::new("/tmp");
+        let timestamp = Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap();
+        
+        let full_id = storage.generate_id(BackupType::Full, timestamp);
+        assert_eq!(full_id, "full-20240101-120000");
+        
+        let snap_id = storage.generate_id(BackupType::Snapshot, timestamp);
+        assert_eq!(snap_id, "snap-20240101-120000");
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_and_read_index() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let storage = BackupStorage::new(temp_dir.path().to_str().unwrap());
+        storage.init()?;
+        
+        let info = BackupInfo {
+            id: "full-20240101-120000".to_string(),
+            backup_type: BackupType::Full,
+            timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap(),
+            profile: "test".to_string(),
+            file_count: 100,
+            size_encrypted: 1024 * 1024, // 1MB
+            parent_id: None,
+            checksum: Some("abc123".to_string()),
+        };
+        
+        storage.write_local_index(&info)?;
+        
+        let read_index = storage.read_local_index("full-20240101-120000")?;
+        
+        assert_eq!(read_index.backup_id, info.id);
+        assert_eq!(read_index.backup_type, info.backup_type);
+        assert_eq!(read_index.profile, info.profile);
+        assert_eq!(read_index.file_count, info.file_count);
+        assert_eq!(read_index.size_encrypted, "1.00MB");
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_storage_stats() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let storage = BackupStorage::new(temp_dir.path().to_str().unwrap());
+        storage.init()?;
+        
+        // Создаем тестовые индексы
+        let info1 = BackupInfo {
+            id: "full-20240101-120000".to_string(),
+            backup_type: BackupType::Full,
+            timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap(),
+            profile: "test1".to_string(),
+            file_count: 100,
+            size_encrypted: 1024 * 1024,
+            parent_id: None,
+            checksum: None,
+        };
+        
+        let info2 = BackupInfo {
+            id: "snap-20240101-130000".to_string(),
+            backup_type: BackupType::Snapshot,
+            timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 13, 0, 0).unwrap(),
+            profile: "test2".to_string(),
+            file_count: 50,
+            size_encrypted: 512 * 1024,
+            parent_id: Some("full-20240101-120000".to_string()),
+            checksum: None,
+        };
+        
+        storage.write_local_index(&info1)?;
+        storage.write_local_index(&info2)?;
+        
+        let stats = storage.get_storage_stats()?;
+        
+        assert_eq!(stats.total_backups, 2);
+        assert_eq!(stats.full_backups, 1);
+        assert_eq!(stats.snapshots, 1);
+        
+        Ok(())
+    }
+}
