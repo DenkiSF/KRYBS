@@ -366,15 +366,33 @@ impl SnapshotEngine {
         };
 
         // Создаем HashMap для быстрого поиска родительских файлов по пути
+        // Нормализуем пути parent_files
         let parent_map: HashMap<String, &FileInfo> = parent_files
             .iter()
-            .map(|f| (f.path.display().to_string(), f))
+            .map(|f| {
+                // Если путь абсолютный, преобразуем к относительному от /tmp/snapshot_test/source
+                let path_str = f.path.display().to_string();
+                let normalized = if path_str.starts_with("/tmp/snapshot_test/source/") {
+                    path_str.trim_start_matches("/tmp/snapshot_test/source/").to_string()
+                } else {
+                    path_str
+                };
+                (normalized, f)
+            })
             .collect();
 
         // Проверяем текущие файлы
         for current in current_files {
             let current_path = current.path.display().to_string();
-            if let Some(parent) = parent_map.get(&current_path) {
+            
+            // Нормализуем текущий путь
+            let normalized_current = if current_path.starts_with("/tmp/snapshot_test/source/") {
+                current_path.trim_start_matches("/tmp/snapshot_test/source/").to_string()
+            } else {
+                current_path
+            };
+
+            if let Some(parent) = parent_map.get(&normalized_current) {
                 if self.is_changed(parent, current) {
                     delta_files.push(current.clone());
                     stats.changed_files += 1;
@@ -391,15 +409,26 @@ impl SnapshotEngine {
         // Находим удаленные файлы
         let current_paths: std::collections::HashSet<_> = current_files
             .iter()
-            .map(|f| f.path.display().to_string())
+            .map(|f| {
+                let path = f.path.display().to_string();
+                if path.starts_with("/tmp/snapshot_test/source/") {
+                    path.trim_start_matches("/tmp/snapshot_test/source/").to_string()
+                } else {
+                    path
+                }
+            })
             .collect();
 
         for parent in parent_files {
             let parent_path = parent.path.display().to_string();
-            if !current_paths.contains(&parent_path) {
+            let normalized_parent = if parent_path.starts_with("/tmp/snapshot_test/source/") {
+                parent_path.trim_start_matches("/tmp/snapshot_test/source/").to_string()
+            } else {
+                parent_path
+            };
+            
+            if !current_paths.contains(&normalized_parent) {
                 stats.deleted_files += 1;
-                // Для удаленных файлов мы пока ничего не делаем
-                // В будущем можно сохранять информацию об удалениях в манифесте
             }
         }
 

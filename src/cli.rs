@@ -1217,7 +1217,7 @@ impl Cli {
                 encryption_status,
                 backup.backup_type,
                 backup.id,
-                backup.timestamp.format("%Y-%m-%d %H:%M:%S"),
+                backup.timestamp.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S"),
                 crate::storage::bytes_to_human(backup.size_encrypted),
                 parent_info
             );
