@@ -775,14 +775,25 @@ impl Cli {
             } => {
                 println!("KRYBS {} command 'list' called", super::VERSION);
 
-                // Загружаем конфиг для получения пути к хранилищу
-                let config =
-                    crate::config::Config::load(global.config.as_deref()).unwrap_or_default();
+                // Загружаем конфигурацию (если есть)
+                let config = crate::config::Config::load(global.config.as_deref()).unwrap_or_default();
+                
+                // ✅ ИСПРАВЛЕНО: Определяем директорию для бэкапа (CLI имеет приоритет)
+                let backup_dir = global
+                    .backup_dir
+                    .as_deref()
+                    .unwrap_or(&config.core.backup_dir);
+
+                println!("Using backup directory: {}", backup_dir.display());
 
                 // Создаем хранилище
-                let storage = crate::storage::BackupStorage::new(
-                    &config.core.backup_dir.display().to_string(),
-                );
+                let storage = crate::storage::BackupStorage::new(&backup_dir.display().to_string());
+
+                // Проверяем существование директории
+                if !backup_dir.exists() {
+                    println!("Backup directory does not exist: {}", backup_dir.display());
+                    return Ok(());
+                }
 
                 if *full_only {
                     // Только полные бэкапы
@@ -810,14 +821,11 @@ impl Cli {
                 } else if *snapshots_only {
                     // Только снепшоты
                     println!("Snapshots:");
-                    // TODO: добавить метод list_all_snapshots в storage
-                    // Пока используем list_all_chained и фильтруем
                     match storage.list_all_chained() {
                         Ok(chains) => {
                             let mut all_snapshots = Vec::new();
                             for chain in chains.values() {
-                                for backup in chain.iter().skip(1) {
-                                    // Пропускаем первый (full)
+                                for backup in chain.iter().skip(1) { // Пропускаем первый (full)
                                     if let Some(filter_profile) = profile_filter {
                                         if &backup.profile != filter_profile {
                                             continue;
@@ -863,7 +871,7 @@ impl Cli {
 
                 Ok(())
             }
-
+                
             Commands::Status {
                 global,
                 check_integrity,

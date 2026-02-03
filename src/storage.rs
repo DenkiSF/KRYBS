@@ -82,7 +82,6 @@ pub fn bytes_to_human(bytes: u64) -> String {
 
 #[derive(Debug, Clone)]
 pub struct BackupStorage {
-    root: PathBuf,
     full_dir: PathBuf,
     snap_dir: PathBuf,
     chains_dir: PathBuf,
@@ -96,7 +95,6 @@ impl BackupStorage {
             full_dir: root_path.join("full"),
             snap_dir: root_path.join("snap"),
             chains_dir: root_path.join("chains"),
-            root: root_path,
         }
     }
 
