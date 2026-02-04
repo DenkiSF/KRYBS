@@ -251,8 +251,8 @@ impl BackupStorage {
         Ok(chain)
     }
 
-    /// Читает полную информацию о бэкапе из индекса
-    fn read_backup_info(&self, id: &str) -> Result<BackupInfo> {
+    /// Читает полную информацию о бэкапе из индекса (публичный метод)
+    pub fn read_backup_info(&self, id: &str) -> Result<BackupInfo> {
         let local_index = self.read_local_index(id)?;
 
         // Конвертируем human-readable размер обратно в байты
@@ -340,7 +340,7 @@ impl BackupStorage {
         }
 
         // Проверяем наличие обязательных файлов
-        let required_files = ["index-local.json", "data.tar.gz.enc", "manifest.json.enc"];
+        let required_files = ["index-local.json", "data.tar.gz", "manifest.json"];
         for file in required_files {
             if !backup_path.join(file).exists() {
                 return Ok(false);

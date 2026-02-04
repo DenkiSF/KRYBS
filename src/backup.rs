@@ -1,8 +1,9 @@
-// src/backup.rs - ПОЛНЫЙ ИСПРАВЛЕННЫЙ КОД
+// src/backup.rs (исправленная версия)
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use indicatif::{ProgressBar, ProgressStyle};
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
@@ -118,7 +119,7 @@ impl BackupEngine {
         // ✅ ИСПРАВЛЕННАЯ валидация архива после создания
         self.validate_archive(&tar_path)?;
 
-        // Шаг 4: Создание манифеста
+        // Шаг 4: Создание манифеста с абсолютными путями
         let manifest_path = backup_dir.join("manifest.json");
         println!("[INFO] Creating manifest: {}", manifest_path.display());
 
@@ -250,7 +251,11 @@ impl BackupEngine {
     async fn get_file_info(&self, path: &Path) -> Result<FileInfo> {
         let metadata = fs::metadata(path).context("Failed to get file metadata")?;
 
-        let rel_path = self.get_relative_path(path)?;
+        let abs_path = if path.is_relative() {
+            std::env::current_dir()?.join(path)
+        } else {
+            path.to_path_buf()
+        };
 
         let mtime = metadata
             .modified()
@@ -269,7 +274,7 @@ impl BackupEngine {
         let mode = None;
 
         Ok(FileInfo {
-            path: rel_path,
+            path: abs_path,
             size: metadata.len(),
             mtime,
             hash,
@@ -277,17 +282,7 @@ impl BackupEngine {
         })
     }
 
-    fn get_relative_path(&self, path: &Path) -> Result<PathBuf> {
-        let current_dir = std::env::current_dir()?;
-        let abs_path = if path.is_relative() {
-            current_dir.join(path)
-        } else {
-            path.to_path_buf()
-        };
-        Ok(abs_path)
-    }
-
-    /// ✅ ИСПРАВЛЕННЫЙ create_tar() - теперь работает правильно
+    /// ✅ ИСПРАВЛЕННЫЙ create_tar() - сохраняет относительные пути в архиве
     pub async fn create_tar(
         &self,
         files: &[FileInfo],
@@ -338,8 +333,6 @@ impl BackupEngine {
             let mut src_file = fs::File::open(abs_path)
                 .with_context(|| format!("Failed to open file: {}", abs_path.display()))?;
 
-            // ✅ ИСПРАВЛЕНО: Используем более простой подход
-            // Вместо ручного создания заголовка, используем удобные методы Builder
             tar_builder.append_file(rel_path, &mut src_file)
                 .with_context(|| format!("Failed to append file to archive: {}", abs_path.display()))?;
 
@@ -348,7 +341,6 @@ impl BackupEngine {
             }
         }
 
-        // ✅ ИСПРАВЛЕННАЯ ФИНАЛИЗАЦИЯ
         tar_builder.into_inner()
             .context("Failed to get inner encoder")?
             .finish()
@@ -370,13 +362,11 @@ impl BackupEngine {
         let decoder = flate2::read::GzDecoder::new(file);
         let mut archive = Archive::new(decoder);
         
-        // Просто читаем записи без попытки собрать в вектор
         let mut count = 0;
         for entry in archive.entries()? {
             let entry = entry?;
             let header = entry.header();
             
-            // Проверяем что путь валиден
             if header.path().is_err() {
                 return Err(anyhow::anyhow!("Invalid path in archive entry"));
             }
@@ -426,6 +416,7 @@ impl BackupEngine {
         common
     }
 
+    /// ✅ ИСПРАВЛЕННЫЙ create_manifest - сохраняет абсолютные пути для сравнения
     fn create_manifest(&self, files: &[FileInfo]) -> Result<serde_json::Value> {
         let common_root = self.find_common_root(files)?;
         
@@ -434,7 +425,8 @@ impl BackupEngine {
             .map(|f| {
                 let rel_path = f.path.strip_prefix(&common_root)?;
                 Ok(serde_json::json!({
-                    "path": rel_path.display().to_string(),
+                    "abs_path": f.path.display().to_string(), // Абсолютный путь для сравнения
+                    "rel_path": rel_path.display().to_string(), // Относительный путь для архива
                     "size": f.size,
                     "mtime": f.mtime.to_rfc3339(),
                     "hash": f.hash,
@@ -448,6 +440,7 @@ impl BackupEngine {
             "file_count": files.len(),
             "total_size": files.iter().map(|f| f.size).sum::<u64>(),
             "timestamp": Utc::now().to_rfc3339(),
+            "common_root": common_root.display().to_string(),
             "files": file_list,
         }))
     }
@@ -476,6 +469,7 @@ impl BackupEngine {
         Ok(true)
     }
 
+    /// ✅ ИСПРАВЛЕННЫЙ restore_backup - восстанавливает цепочку бэкапов
     pub async fn restore_backup(
         &self,
         backup_id: &str,
@@ -484,23 +478,89 @@ impl BackupEngine {
         overwrite: bool,
         progress: bool,
     ) -> Result<()> {
-        let backup_path = self.storage.backup_path(backup_id);
-
-        if !backup_path.exists() {
-            return Err(anyhow::anyhow!("Backup not found: {}", backup_id));
-        }
-
         println!("[INFO] Restoring backup: {}", backup_id);
         println!("[INFO] Destination: {}", destination.display());
 
-        let archive_path = backup_path.join("data.tar.gz");
+        // Получаем информацию о бэкапе
+        let backup_info = self.storage.read_backup_info(backup_id)
+            .context(format!("Failed to read backup info: {}", backup_id))?;
 
-        if !archive_path.exists() {
-            return Err(anyhow::anyhow!("Archive not found in backup"));
+        // Создаем цепочку восстановления
+        let chain = self.build_restore_chain(&backup_info).await?;
+        
+        println!("[INFO] Restoring chain of {} backups", chain.len());
+
+        // Создаем уникальное имя для временной директории
+        let mut rng = rand::thread_rng();
+        let random_num: u32 = rng.r#gen::<u32>(); // Исправлено: явно указали тип
+        let temp_dir_name = format!("krybs-restore-{}-{}", backup_id, random_num);
+        let temp_dir = std::env::temp_dir().join(temp_dir_name);
+        let temp_path = &temp_dir;
+        
+        // Создаем временную директорию
+        fs::create_dir_all(temp_path)?;
+        
+        if progress {
+            println!("[INFO] Using temporary directory: {}", temp_path.display());
         }
 
-        fs::create_dir_all(destination)?;
+        // Восстанавливаем всю цепочку во временную директорию
+        for (i, backup) in chain.iter().enumerate() {
+            if progress {
+                println!("[INFO] Restoring {}/{}: {}", i + 1, chain.len(), backup.id);
+            }
+            
+            let backup_path = self.storage.backup_path(&backup.id);
+            let archive_path = backup_path.join("data.tar.gz");
 
+            if !archive_path.exists() {
+                // Пытаемся удалить временную директорию
+                let _ = fs::remove_dir_all(temp_path);
+                return Err(anyhow::anyhow!("Archive not found: {}", backup.id));
+            }
+
+            self.extract_archive(&archive_path, temp_path, specific_path.clone(), overwrite, progress).await?;
+        }
+
+        // Копируем файлы из временной директории в целевую
+        self.copy_directory(temp_path, destination, overwrite, progress).await?;
+
+        // Удаляем временную директорию
+        if let Err(e) = fs::remove_dir_all(temp_path) {
+            eprintln!("[WARN] Failed to remove temporary directory: {}", e);
+        }
+
+        println!("[SUCCESS] Restore completed to {}", destination.display());
+        Ok(())
+    }
+
+    /// Строит цепочку бэкапов для восстановления
+    async fn build_restore_chain(&self, backup_info: &BackupInfo) -> Result<Vec<BackupInfo>> {
+        let mut chain = vec![backup_info.clone()];
+        let mut current = backup_info.clone();
+
+        // Идем вверх по цепочке, пока не найдем полный бэкап
+        while let Some(parent_id) = &current.parent_id {
+            let parent = self.storage.read_backup_info(parent_id)?;
+            chain.insert(0, parent.clone());
+            current = parent;
+        }
+
+        Ok(chain)
+    }
+
+    /// Извлекает архив
+    async fn extract_archive(
+        &self,
+        archive_path: &Path,
+        destination: &Path,
+        specific_path: Option<&Path>,
+        overwrite: bool,
+        progress: bool,
+    ) -> Result<()> {
+        let file = fs::File::open(archive_path)
+            .context(format!("Failed to open archive: {}", archive_path.display()))?;
+        
         let pb = if progress {
             Some(ProgressBar::new_spinner())
         } else {
@@ -508,30 +568,29 @@ impl BackupEngine {
         };
 
         if let Some(ref pb) = pb {
-            pb.set_style(ProgressStyle::default_spinner().template("{spinner} Restoring: {msg}")?);
-            pb.set_message("Extracting files...");
+            pb.set_style(ProgressStyle::default_spinner().template("{spinner} Extracting: {msg}")?);
+            pb.set_message("Starting...");
         }
 
-        let file = fs::File::open(&archive_path)?;
         let mut archive = Archive::new(flate2::read::GzDecoder::new(file));
-
+        
         for entry in archive.entries()? {
             let mut entry = entry?;
-            let path = entry.path()?.to_path_buf();
+            let path_in_archive = entry.path()?.to_path_buf();
 
-            if let Some(specific_path) = specific_path {
-                if !path.starts_with(specific_path) {
+            // Если указан specific_path, фильтруем по нему
+            if let Some(specific_path) = &specific_path {
+                if !path_in_archive.starts_with(specific_path) {
                     continue;
                 }
             }
 
-            let dest_path = destination.join(&path);
+            let dest_path = destination.join(&path_in_archive);
 
             if dest_path.exists() && !overwrite {
-                eprintln!(
-                    "[WARN] Skipping {} (already exists, use --force to overwrite)",
-                    path.display()
-                );
+                if let Some(ref pb) = pb {
+                    pb.set_message(format!("Skipping: {} (exists)", path_in_archive.display()));
+                }
                 continue;
             }
 
@@ -542,15 +601,70 @@ impl BackupEngine {
             entry.unpack(&dest_path)?;
 
             if let Some(ref pb) = pb {
-                pb.set_message(format!("Restored: {}", path.display()));
+                pb.set_message(format!("Extracted: {}", path_in_archive.display()));
             }
         }
 
         if let Some(pb) = pb {
-            pb.finish_with_message("Restore completed");
+            pb.finish_with_message("Extraction completed");
         }
 
-        println!("[SUCCESS] Restore completed to {}", destination.display());
+        Ok(())
+    }
+
+    /// Копирует директорию
+    async fn copy_directory(
+        &self,
+        source: &Path,
+        destination: &Path,
+        overwrite: bool,
+        progress: bool,
+    ) -> Result<()> {
+        let pb = if progress {
+            Some(ProgressBar::new_spinner())
+        } else {
+            None
+        };
+
+        if let Some(ref pb) = pb {
+            pb.set_style(ProgressStyle::default_spinner().template("{spinner} Copying: {msg}")?);
+            pb.set_message("Starting...");
+        }
+
+        fs::create_dir_all(destination)?;
+
+        for entry in WalkDir::new(source) {
+            let entry = entry?;
+            let src_path = entry.path();
+
+            if !src_path.is_file() {
+                continue;
+            }
+
+            let rel_path = src_path.strip_prefix(source)?;
+            let dst_path = destination.join(rel_path);
+
+            if dst_path.exists() && !overwrite {
+                if let Some(ref pb) = pb {
+                    pb.set_message(format!("Skipping: {} (exists)", rel_path.display()));
+                }
+                continue;
+            }
+
+            if let Some(parent) = dst_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            fs::copy(src_path, &dst_path)?;
+
+            if let Some(ref pb) = pb {
+                pb.set_message(format!("Copied: {}", rel_path.display()));
+            }
+        }
+
+        if let Some(pb) = pb {
+            pb.finish_with_message("Copy completed");
+        }
 
         Ok(())
     }
@@ -681,7 +795,6 @@ mod tests {
     async fn test_create_and_validate_archive() -> Result<()> {
         let temp_dir = tempdir()?;
         
-        // Создаем несколько тестовых файлов
         let file1 = temp_dir.path().join("file1.txt");
         let file2 = temp_dir.path().join("file2.txt");
         fs::write(&file1, "content 1")?;
@@ -691,7 +804,6 @@ mod tests {
         let config = Config::default();
         let engine = BackupEngine::new(storage, config);
 
-        // Создаем FileInfo структуры
         let files = vec![
             FileInfo {
                 path: file1.clone(),
@@ -715,7 +827,6 @@ mod tests {
         assert!(archive_path.exists());
         assert!(size > 0);
         
-        // Проверяем валидацию
         engine.validate_archive(&archive_path)?;
         
         Ok(())
@@ -725,7 +836,6 @@ mod tests {
     async fn test_scan_paths_with_exclude() -> Result<()> {
         let temp_dir = tempdir()?;
         
-        // Создаем тестовую структуру
         let file1 = temp_dir.path().join("include.txt");
         let file2 = temp_dir.path().join("exclude.tmp");
         fs::write(&file1, "include")?;

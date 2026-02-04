@@ -39,7 +39,8 @@ impl DeltaStats {
 /// Информация о файле в манифесте
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestFile {
-    pub path: String,
+    pub abs_path: String,      // Абсолютный путь для сравнения
+    pub rel_path: String,      // Относительный путь для архива
     pub size: u64,
     pub mtime: String,
     pub hash: String,
@@ -53,6 +54,7 @@ pub struct BackupManifest {
     pub file_count: usize,
     pub total_size: u64,
     pub timestamp: String,
+    pub common_root: Option<String>, // Общий корень для относительных путей
     pub files: Vec<ManifestFile>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
@@ -104,8 +106,14 @@ impl SnapshotEngine {
             crate::storage::bytes_to_human(parent_manifest.total_size)
         );
 
+        // Получаем общий корень из родительского манифеста
+        let common_root = parent_manifest.common_root
+            .as_ref()
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("Parent manifest missing common_root"))?;
+
         // Преобразуем манифест в FileInfo для сравнения
-        let parent_files = self.manifest_to_fileinfo(&parent_manifest)?;
+        let parent_files = self.manifest_to_fileinfo(&parent_manifest, &common_root)?;
 
         // Сканируем текущую файловую систему
         println!("[INFO] Scanning current filesystem...");
@@ -181,47 +189,12 @@ impl SnapshotEngine {
         let manifest_path = snapshot_dir.join("manifest.json");
         println!("[INFO] Creating snapshot manifest...");
 
-        let manifest = self.create_snapshot_manifest(&delta_files, parent_id)?;
+        let manifest = self.create_snapshot_manifest(&delta_files, parent_id, &common_root)?;
         fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)
             .context("Failed to write manifest")?;
 
         // ШИФРОВАНИЕ снепшота - ЗАКОММЕНТИРОВАНО ДЛЯ ТЕСТИРОВАНИЯ
         let final_archive_size = archive_size;
-
-        // ЗАКОММЕНТИРОВАНО: шифрование временно отключено
-        /*
-        if self.backup_engine.config.crypto.master_key_path.exists() {
-            println!("[INFO] Encrypting snapshot files...");
-
-            let crypto = crate::crypto::CryptoManager::load_master_key(
-                &self.backup_engine.config.crypto.master_key_path,
-            )?;
-
-            // Шифруем архив
-            let encrypted_tar_path = snapshot_dir.join("data.tar.gz.enc");
-            crypto
-                .encrypt_file(&tar_path, &encrypted_tar_path)
-                .context("Failed to encrypt snapshot archive")?;
-
-            // Шифруем манифест
-            let encrypted_manifest_path = snapshot_dir.join("manifest.json.enc");
-            crypto
-                .encrypt_file(&manifest_path, &encrypted_manifest_path)
-                .context("Failed to encrypt snapshot manifest")?;
-
-            // Удаляем незашифрованные файлы если настроено
-            if self.backup_engine.config.crypto.delete_plain {
-                fs::remove_file(&tar_path)?;
-                fs::remove_file(&manifest_path)?;
-                println!("[INFO] Plaintext snapshot files removed");
-            }
-
-            // Обновляем размер
-            final_archive_size = fs::metadata(&encrypted_tar_path)?.len();
-        } else {
-            println!("[WARN] Master key not found, snapshot will be stored unencrypted");
-        }
-        */
         println!("[INFO] Encryption is temporarily disabled for testing");
 
         // Создаем локальный индекс
@@ -263,14 +236,6 @@ impl SnapshotEngine {
         );
         println!("  Duration:     {:.1}s", duration_secs);
         println!("  Location:     {}", snapshot_dir.display());
-
-        // Показываем информацию о шифровании
-        // ЗАКОММЕНТИРОВАНО: временно отключено
-        // if self.backup_engine.config.crypto.master_key_path.exists() {
-        //     println!("  Encryption:   ✓ (GOST Kuznechik)");
-        // } else {
-        //     println!("  Encryption:   ✗ (not encrypted)");
-        // }
         println!("  Encryption:   ✗ (temporarily disabled for testing)");
 
         Ok(result)
@@ -366,33 +331,16 @@ impl SnapshotEngine {
         };
 
         // Создаем HashMap для быстрого поиска родительских файлов по пути
-        // Нормализуем пути parent_files
         let parent_map: HashMap<String, &FileInfo> = parent_files
             .iter()
-            .map(|f| {
-                // Если путь абсолютный, преобразуем к относительному от /tmp/snapshot_test/source
-                let path_str = f.path.display().to_string();
-                let normalized = if path_str.starts_with("/tmp/snapshot_test/source/") {
-                    path_str.trim_start_matches("/tmp/snapshot_test/source/").to_string()
-                } else {
-                    path_str
-                };
-                (normalized, f)
-            })
+            .map(|f| (f.path.display().to_string(), f))
             .collect();
 
         // Проверяем текущие файлы
         for current in current_files {
             let current_path = current.path.display().to_string();
             
-            // Нормализуем текущий путь
-            let normalized_current = if current_path.starts_with("/tmp/snapshot_test/source/") {
-                current_path.trim_start_matches("/tmp/snapshot_test/source/").to_string()
-            } else {
-                current_path
-            };
-
-            if let Some(parent) = parent_map.get(&normalized_current) {
+            if let Some(parent) = parent_map.get(&current_path) {
                 if self.is_changed(parent, current) {
                     delta_files.push(current.clone());
                     stats.changed_files += 1;
@@ -409,26 +357,15 @@ impl SnapshotEngine {
         // Находим удаленные файлы
         let current_paths: std::collections::HashSet<_> = current_files
             .iter()
-            .map(|f| {
-                let path = f.path.display().to_string();
-                if path.starts_with("/tmp/snapshot_test/source/") {
-                    path.trim_start_matches("/tmp/snapshot_test/source/").to_string()
-                } else {
-                    path
-                }
-            })
+            .map(|f| f.path.display().to_string())
             .collect();
 
         for parent in parent_files {
             let parent_path = parent.path.display().to_string();
-            let normalized_parent = if parent_path.starts_with("/tmp/snapshot_test/source/") {
-                parent_path.trim_start_matches("/tmp/snapshot_test/source/").to_string()
-            } else {
-                parent_path
-            };
-            
-            if !current_paths.contains(&normalized_parent) {
+            if !current_paths.contains(&parent_path) {
                 stats.deleted_files += 1;
+                // Для удаленных файлов мы пока ничего не делаем
+                // В будущем можно сохранять информацию об удалениях в манифесте
             }
         }
 
@@ -456,45 +393,7 @@ impl SnapshotEngine {
     async fn load_manifest(&self, backup_id: &str) -> Result<BackupManifest> {
         let backup_path = self.storage.backup_path(backup_id);
 
-        // Проверяем, зашифрован ли манифест
-        // ЗАКОММЕНТИРОВАНО: временно работаем только с незашифрованными файлами
-        /*
-        let manifest_path = backup_path.join("manifest.json.enc");
-        let plain_manifest_path = backup_path.join("manifest.json");
-
-        let content = if manifest_path.exists() {
-            // Зашифрованный манифест
-            if !self.backup_engine.config.crypto.master_key_path.exists() {
-                bail!("Master key not found, cannot load encrypted manifest");
-            }
-
-            // Создаем временный файл для расшифровки
-            let temp_file =
-                std::env::temp_dir().join(format!("manifest-temp-{}", rand::random::<u32>()));
-            let crypto = crate::crypto::CryptoManager::load_master_key(
-                &self.backup_engine.config.crypto.master_key_path,
-            )?;
-            crypto
-                .decrypt_file(&manifest_path, &temp_file)
-                .context("Failed to decrypt manifest")?;
-
-            let content = tokio::fs::read_to_string(&temp_file).await?;
-
-            // Удаляем временный файл
-            let _ = std::fs::remove_file(&temp_file);
-
-            content
-        } else if plain_manifest_path.exists() {
-            // Незашифрованный манифест
-            tokio::fs::read_to_string(&plain_manifest_path).await?
-        } else {
-            return Err(anyhow::anyhow!(
-                "Manifest not found for backup {}",
-                backup_id
-            ));
-        };
-        */
-        
+        // Работаем только с незашифрованными файлами (временно)
         let plain_manifest_path = backup_path.join("manifest.json");
         let content = tokio::fs::read_to_string(&plain_manifest_path).await?;
 
@@ -505,7 +404,7 @@ impl SnapshotEngine {
     }
 
     /// Преобразует манифест в FileInfo
-    fn manifest_to_fileinfo(&self, manifest: &BackupManifest) -> Result<Vec<FileInfo>> {
+    fn manifest_to_fileinfo(&self, manifest: &BackupManifest, common_root: &PathBuf) -> Result<Vec<FileInfo>> {
         let mut files = Vec::with_capacity(manifest.files.len());
 
         for file in &manifest.files {
@@ -513,8 +412,16 @@ impl SnapshotEngine {
                 .context("Failed to parse mtime")?
                 .with_timezone(&Utc);
 
+            // Восстанавливаем абсолютный путь
+            let abs_path = if file.abs_path.starts_with('/') {
+                PathBuf::from(&file.abs_path)
+            } else {
+                // Если в манифесте нет абсолютного пути, используем относительный + common_root
+                common_root.join(&file.rel_path)
+            };
+
             files.push(FileInfo {
-                path: PathBuf::from(&file.path),
+                path: abs_path,
                 size: file.size,
                 mtime,
                 hash: file.hash.clone(),
@@ -530,15 +437,24 @@ impl SnapshotEngine {
         &self,
         files: &[FileInfo],
         parent_id: &str,
+        common_root: &PathBuf,
     ) -> Result<BackupManifest> {
         let file_list: Vec<ManifestFile> = files
             .iter()
-            .map(|f| ManifestFile {
-                path: f.path.display().to_string(),
-                size: f.size,
-                mtime: f.mtime.to_rfc3339(),
-                hash: f.hash.clone(),
-                mode: f.mode,
+            .map(|f| {
+                // Вычисляем относительный путь от common_root
+                let rel_path = f.path.strip_prefix(common_root)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| f.path.display().to_string());
+
+                ManifestFile {
+                    abs_path: f.path.display().to_string(),
+                    rel_path,
+                    size: f.size,
+                    mtime: f.mtime.to_rfc3339(),
+                    hash: f.hash.clone(),
+                    mode: f.mode,
+                }
             })
             .collect();
 
@@ -547,6 +463,7 @@ impl SnapshotEngine {
             file_count: files.len(),
             total_size: files.iter().map(|f| f.size).sum(),
             timestamp: Utc::now().to_rfc3339(),
+            common_root: Some(common_root.display().to_string()),
             files: file_list,
             parent_id: Some(parent_id.to_string()),
         })
@@ -586,11 +503,9 @@ impl SnapshotEngine {
 
             if exists {
                 // Проверяем наличие файлов (зашифрованных или незашифрованных)
-                // ЗАКОММЕНТИРОВАНО: временно проверяем только незашифрованные
-                // let has_encrypted = backup_path.join("data.tar.gz.enc").exists();
                 let has_plain = backup_path.join("data.tar.gz").exists();
 
-                if has_plain { // || has_encrypted
+                if has_plain {
                     println!("OK");
                 } else {
                     println!("MISSING FILES");
@@ -706,5 +621,40 @@ impl SnapshotEngine {
 
         println!("Deleted {} snapshots", deleted);
         Ok(deleted)
+    }
+
+    /// Проверяет целостность бэкапа
+    pub async fn verify_backup(&self, backup_id: &str) -> Result<bool> {
+        let backup_path = self.storage.backup_path(backup_id);
+        
+        if !backup_path.exists() {
+            println!("Backup directory not found: {}", backup_id);
+            return Ok(false);
+        }
+
+        let required_files = vec!["data.tar.gz", "manifest.json", "index-local.json"];
+        let mut ok = true;
+
+        for file in required_files {
+            let file_path = backup_path.join(file);
+            if !file_path.exists() {
+                println!("Missing file: {}", file);
+                ok = false;
+            }
+        }
+
+        if ok {
+            // Проверяем целостность архива
+            let archive_path = backup_path.join("data.tar.gz");
+            match self.backup_engine.validate_archive(&archive_path) {
+                Ok(_) => println!("Archive validation passed"),
+                Err(e) => {
+                    println!("Archive validation failed: {}", e);
+                    ok = false;
+                }
+            }
+        }
+
+        Ok(ok)
     }
 }
