@@ -1,19 +1,19 @@
-// src/backup.rs (исправленная версия)
+// src/backup.rs
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use indicatif::{ProgressBar, ProgressStyle};
-use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tar::{Archive, Builder};
-use walkdir::WalkDir;
+use tempfile::tempdir;
 
 use crate::config::Config;
 use crate::storage::{BackupInfo, BackupStorage, BackupType};
+use crate::crypto::Crypto;
 
 #[derive(Debug, Clone)]
 pub struct FileInfo {
@@ -33,6 +33,7 @@ pub struct BackupResult {
     pub file_count: usize,
     pub size_bytes: u64,
     pub archive_size: u64,
+    pub encrypted: bool,
     pub duration_secs: f64,
 }
 
@@ -40,39 +41,55 @@ pub struct BackupResult {
 pub struct BackupEngine {
     pub storage: BackupStorage,
     pub config: Arc<Config>,
+    pub crypto: Crypto,
 }
 
 impl BackupEngine {
     /// Создает новый движок бэкапа
-    pub fn new(storage: BackupStorage, config: Config) -> Self {
-        Self {
+    pub fn new(storage: BackupStorage, config: Config) -> Result<Self> {
+        // Инициализируем криптографию
+        let crypto = if config.crypto.master_key_path.exists() {
+            match Crypto::load_key(&config.crypto.master_key_path) {
+                Ok(key) => {
+                    println!("[INFO] Encryption enabled with Kuznechik cipher");
+                    Crypto::new_with_key(key)
+                }
+                Err(e) => {
+                    eprintln!("[WARN] Failed to load encryption key: {}", e);
+                    eprintln!("[WARN] Continuing without encryption");
+                    Crypto::new_without_encryption()
+                }
+            }
+        } else {
+            println!("[INFO] Encryption key not found, encryption disabled");
+            Crypto::new_without_encryption()
+        };
+
+        Ok(Self {
             storage,
             config: Arc::new(config),
-        }
+            crypto,
+        })
     }
 
-    /// Создает полный бэкап указанных путей
-    pub async fn create_full(
+    /// Создает бэкап указанных путей
+    pub async fn create_backup(
         &self,
         paths: Vec<PathBuf>,
         exclude_patterns: Vec<String>,
         profile_name: Option<&str>,
-        dry_run: bool,
         progress: bool,
     ) -> Result<BackupResult> {
         let start_time = Utc::now();
 
         let profile = profile_name.unwrap_or("manual");
 
-        println!("[INFO] Starting full backup for profile: {}", profile);
+        println!("[INFO] Starting backup for profile: {}", profile);
         println!("[INFO] Source paths: {:?}", paths);
+        println!("[INFO] Encryption: {}", if self.crypto.is_enabled() { "ENABLED (Kuznechik)" } else { "DISABLED" });
 
         if !exclude_patterns.is_empty() {
             println!("[INFO] Exclude patterns: {:?}", exclude_patterns);
-        }
-
-        if dry_run {
-            println!("[DRY RUN] No files will be actually backed up");
         }
 
         // Шаг 1: Сканирование файлов
@@ -90,19 +107,6 @@ impl BackupEngine {
             crate::storage::bytes_to_human(total_size)
         );
 
-        if dry_run {
-            return Ok(BackupResult {
-                id: "dry-run".to_string(),
-                backup_type: BackupType::Full,
-                timestamp: start_time,
-                profile: profile.to_string(),
-                file_count: files.len(),
-                size_bytes: total_size,
-                archive_size: 0,
-                duration_secs: 0.0,
-            });
-        }
-
         // Шаг 2: Генерация ID бэкапа
         let backup_id = self.storage.generate_id(BackupType::Full, start_time);
         let backup_dir = self.storage.backup_path(&backup_id);
@@ -116,20 +120,36 @@ impl BackupEngine {
 
         let archive_size = self.create_tar(&files, &tar_path, progress).await?;
 
-        // ✅ ИСПРАВЛЕННАЯ валидация архива после создания
+        // Валидация архива после создания
         self.validate_archive(&tar_path)?;
 
-        // Шаг 4: Создание манифеста с абсолютными путями
+        // Шаг 4: ШИФРОВАНИЕ архива (если включено)
+        let (final_archive_path, final_archive_size, encrypted) = if self.crypto.is_enabled() {
+            let encrypted_path = tar_path.with_extension("tar.gz.enc");
+            println!("[INFO] Encrypting archive with Kuznechik cipher...");
+            
+            self.crypto.encrypt_file(&tar_path, &encrypted_path)
+                .context("Failed to encrypt archive")?;
+
+            // Удаляем незашифрованный архив если настроено
+            if self.config.crypto.delete_plain {
+                fs::remove_file(&tar_path)?;
+                println!("[INFO] Removed plaintext archive (delete_plain=true)");
+            }
+
+            let encrypted_size = fs::metadata(&encrypted_path)?.len();
+            (encrypted_path, encrypted_size, true)
+        } else {
+            (tar_path.clone(), archive_size, false)
+        };
+
+        // Шаг 5: Создание манифеста с абсолютными путями
         let manifest_path = backup_dir.join("manifest.json");
         println!("[INFO] Creating manifest: {}", manifest_path.display());
 
-        let manifest = self.create_manifest(&files)?;
+        let manifest = self.create_manifest(&files, encrypted)?;
         fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)
             .context("Failed to write manifest")?;
-
-        // Шаг 5: ШИФРОВАНИЕ - ЗАКОММЕНТИРОВАНО ДЛЯ ТЕСТИРОВАНИЯ
-        let final_archive_size = archive_size;
-        println!("[INFO] Encryption is temporarily disabled for testing");
 
         // Шаг 6: Создание локального индекса
         let backup_info = BackupInfo {
@@ -139,8 +159,8 @@ impl BackupEngine {
             profile: profile.to_string(),
             file_count: files.len() as u64,
             size_encrypted: final_archive_size,
-            parent_id: None,
-            checksum: Some(crate::backup::calculate_file_hash(&tar_path).await?),
+            checksum: Some(calculate_file_hash(&final_archive_path).await?),
+            encrypted: Some(encrypted),
         };
 
         self.storage.write_local_index(&backup_info)?;
@@ -158,10 +178,11 @@ impl BackupEngine {
             file_count: files.len(),
             size_bytes: total_size,
             archive_size: final_archive_size,
+            encrypted,
             duration_secs,
         };
 
-        println!("\n[SUCCESS] Full backup created: {}", backup_id);
+        println!("\n[SUCCESS] Backup created: {}", backup_id);
         println!("  Profile:      {}", profile);
         println!("  Files:        {}", files.len());
         println!("  Original:     {}", crate::storage::bytes_to_human(total_size));
@@ -172,9 +193,9 @@ impl BackupEngine {
             0.0
         };
         println!("  Compression:  {:.1}%", compression_ratio);
+        println!("  Encryption:   {}", if encrypted { "✓ (Kuznechik)" } else { "✗" });
         println!("  Duration:     {:.1}s", duration_secs);
         println!("  Location:     {}", backup_dir.display());
-        println!("  Encryption:   ✗ (temporarily disabled for testing)");
 
         Ok(result)
     }
@@ -208,7 +229,7 @@ impl BackupEngine {
                 continue;
             }
 
-            for entry in WalkDir::new(path)
+            for entry in walkdir::WalkDir::new(path)
                 .follow_links(false)
                 .into_iter()
                 .filter_map(|e| e.ok())
@@ -282,7 +303,7 @@ impl BackupEngine {
         })
     }
 
-    /// ✅ ИСПРАВЛЕННЫЙ create_tar() - сохраняет относительные пути в архиве
+    /// Создает tar архив из файлов
     pub async fn create_tar(
         &self,
         files: &[FileInfo],
@@ -354,7 +375,7 @@ impl BackupEngine {
         Ok(metadata.len())
     }
 
-    /// ✅ ИСПРАВЛЕННЫЙ метод валидации архива
+    /// Валидация архива
     pub fn validate_archive(&self, path: &Path) -> Result<()> {
         println!("[INFO] Validating archive: {}", path.display());
         
@@ -416,8 +437,8 @@ impl BackupEngine {
         common
     }
 
-    /// ✅ ИСПРАВЛЕННЫЙ create_manifest - сохраняет абсолютные пути для сравнения
-    fn create_manifest(&self, files: &[FileInfo]) -> Result<serde_json::Value> {
+    /// Создает манифест бэкапа
+    fn create_manifest(&self, files: &[FileInfo], encrypted: bool) -> Result<serde_json::Value> {
         let common_root = self.find_common_root(files)?;
         
         let file_list: Vec<serde_json::Value> = files
@@ -425,8 +446,8 @@ impl BackupEngine {
             .map(|f| {
                 let rel_path = f.path.strip_prefix(&common_root)?;
                 Ok(serde_json::json!({
-                    "abs_path": f.path.display().to_string(), // Абсолютный путь для сравнения
-                    "rel_path": rel_path.display().to_string(), // Относительный путь для архива
+                    "abs_path": f.path.display().to_string(),
+                    "rel_path": rel_path.display().to_string(),
                     "size": f.size,
                     "mtime": f.mtime.to_rfc3339(),
                     "hash": f.hash,
@@ -441,15 +462,21 @@ impl BackupEngine {
             "total_size": files.iter().map(|f| f.size).sum::<u64>(),
             "timestamp": Utc::now().to_rfc3339(),
             "common_root": common_root.display().to_string(),
+            "encrypted": encrypted,
+            "encryption_algorithm": if encrypted { "GOST R 34.12-2015 (Kuznechik)" } else { "none" },
             "files": file_list,
         }))
     }
 
+    /// Проверяет целостность бэкапа
     pub async fn verify_backup(&self, backup_id: &str) -> Result<bool> {
         let backup_path = self.storage.backup_path(backup_id);
-        let tar_path = backup_path.join("data.tar.gz");
-
-        if !tar_path.exists() {
+        
+        // Проверяем наличие зашифрованного или обычного архива
+        let encrypted_path = backup_path.join("data.tar.gz.enc");
+        let plain_path = backup_path.join("data.tar.gz");
+        
+        if !encrypted_path.exists() && !plain_path.exists() {
             return Ok(false);
         }
 
@@ -457,19 +484,43 @@ impl BackupEngine {
 
         if let Ok(index) = self.storage.read_local_index(backup_id) {
             println!("  Files in manifest: {}", index.file_count);
+            println!("  Encrypted: {}", index.encrypted.unwrap_or(false));
 
-            let file = fs::File::open(&tar_path)?;
-            let mut archive = Archive::new(flate2::read::GzDecoder::new(file));
-            let file_count = archive.entries()?.count();
-            println!("  Files in archive: {}", file_count);
-
-            return Ok(true);
+            // Если архив зашифрован и у нас есть ключ, проверяем дешифрование
+            if index.encrypted.unwrap_or(false) && self.crypto.is_enabled() {
+                println!("  Testing decryption...");
+                let temp_dir = tempdir()?;
+                let temp_file = temp_dir.path().join("test_decrypt.tar.gz");
+                
+                match self.crypto.decrypt_file(&encrypted_path, &temp_file) {
+                    Ok(_) => {
+                        println!("  Decryption: OK");
+                        // Проверяем архив после дешифрования
+                        let file = fs::File::open(&temp_file)?;
+                        let mut archive = Archive::new(flate2::read::GzDecoder::new(file));
+                        let file_count = archive.entries()?.count();
+                        println!("  Files in archive: {}", file_count);
+                        return Ok(true);
+                    }
+                    Err(e) => {
+                        println!("  Decryption: FAILED - {}", e);
+                        return Ok(false);
+                    }
+                }
+            } else if plain_path.exists() {
+                // Проверяем обычный архив
+                let file = fs::File::open(&plain_path)?;
+                let mut archive = Archive::new(flate2::read::GzDecoder::new(file));
+                let file_count = archive.entries()?.count();
+                println!("  Files in archive: {}", file_count);
+                return Ok(true);
+            }
         }
 
         Ok(true)
     }
 
-    /// ✅ ИСПРАВЛЕННЫЙ restore_backup - восстанавливает цепочку бэкапов
+    /// Восстанавливает бэкап
     pub async fn restore_backup(
         &self,
         backup_id: &str,
@@ -485,68 +536,47 @@ impl BackupEngine {
         let backup_info = self.storage.read_backup_info(backup_id)
             .context(format!("Failed to read backup info: {}", backup_id))?;
 
-        // Создаем цепочку восстановления
-        let chain = self.build_restore_chain(&backup_info).await?;
+        let backup_path = self.storage.backup_path(&backup_info.id);
         
-        println!("[INFO] Restoring chain of {} backups", chain.len());
+        // Проверяем наличие зашифрованного или обычного архива
+        let encrypted_path = backup_path.join("data.tar.gz.enc");
+        let plain_path = backup_path.join("data.tar.gz");
+        
+        let (archive_path, is_encrypted) = if encrypted_path.exists() {
+            (&encrypted_path, true)
+        } else if plain_path.exists() {
+            (&plain_path, false)
+        } else {
+            return Err(anyhow::anyhow!("Archive not found: {}", backup_info.id));
+        };
 
-        // Создаем уникальное имя для временной директории
-        let mut rng = rand::thread_rng();
-        let random_num: u32 = rng.r#gen::<u32>(); // Исправлено: явно указали тип
-        let temp_dir_name = format!("krybs-restore-{}-{}", backup_id, random_num);
-        let temp_dir = std::env::temp_dir().join(temp_dir_name);
-        let temp_path = &temp_dir;
-        
-        // Создаем временную директорию
-        fs::create_dir_all(temp_path)?;
-        
-        if progress {
-            println!("[INFO] Using temporary directory: {}", temp_path.display());
+        println!("[INFO] Archive: {}", archive_path.display());
+        println!("[INFO] Encrypted: {}", is_encrypted);
+
+        if is_encrypted && !self.crypto.is_enabled() {
+            return Err(anyhow::anyhow!(
+                "Backup is encrypted but encryption is not enabled. Load encryption key first."
+            ));
         }
 
-        // Восстанавливаем всю цепочку во временную директорию
-        for (i, backup) in chain.iter().enumerate() {
-            if progress {
-                println!("[INFO] Restoring {}/{}: {}", i + 1, chain.len(), backup.id);
-            }
-            
-            let backup_path = self.storage.backup_path(&backup.id);
-            let archive_path = backup_path.join("data.tar.gz");
+        // Создаем временный файл для дешифрования
+        let temp_dir = tempfile::tempdir()?;
+        let temp_archive = temp_dir.path().join("data.tar.gz");
 
-            if !archive_path.exists() {
-                // Пытаемся удалить временную директорию
-                let _ = fs::remove_dir_all(temp_path);
-                return Err(anyhow::anyhow!("Archive not found: {}", backup.id));
-            }
-
-            self.extract_archive(&archive_path, temp_path, specific_path.clone(), overwrite, progress).await?;
+        if is_encrypted {
+            println!("[INFO] Decrypting archive with Kuznechik cipher...");
+            self.crypto.decrypt_file(archive_path, &temp_archive)
+                .context("Failed to decrypt archive")?;
+        } else {
+            // Просто копируем, если не зашифрован
+            fs::copy(archive_path, &temp_archive)?;
         }
 
-        // Копируем файлы из временной директории в целевую
-        self.copy_directory(temp_path, destination, overwrite, progress).await?;
-
-        // Удаляем временную директорию
-        if let Err(e) = fs::remove_dir_all(temp_path) {
-            eprintln!("[WARN] Failed to remove temporary directory: {}", e);
-        }
+        // Извлекаем из временного архива
+        self.extract_archive(&temp_archive, destination, specific_path, overwrite, progress).await?;
 
         println!("[SUCCESS] Restore completed to {}", destination.display());
         Ok(())
-    }
-
-    /// Строит цепочку бэкапов для восстановления
-    async fn build_restore_chain(&self, backup_info: &BackupInfo) -> Result<Vec<BackupInfo>> {
-        let mut chain = vec![backup_info.clone()];
-        let mut current = backup_info.clone();
-
-        // Идем вверх по цепочке, пока не найдем полный бэкап
-        while let Some(parent_id) = &current.parent_id {
-            let parent = self.storage.read_backup_info(parent_id)?;
-            chain.insert(0, parent.clone());
-            current = parent;
-        }
-
-        Ok(chain)
     }
 
     /// Извлекает архив
@@ -612,61 +642,13 @@ impl BackupEngine {
         Ok(())
     }
 
-    /// Копирует директорию
-    async fn copy_directory(
-        &self,
-        source: &Path,
-        destination: &Path,
-        overwrite: bool,
-        progress: bool,
-    ) -> Result<()> {
-        let pb = if progress {
-            Some(ProgressBar::new_spinner())
+    /// Получает статус шифрования
+    pub fn encryption_status(&self) -> &'static str {
+        if self.crypto.is_enabled() {
+            "ENABLED (Kuznechik GOST R 34.12-2015)"
         } else {
-            None
-        };
-
-        if let Some(ref pb) = pb {
-            pb.set_style(ProgressStyle::default_spinner().template("{spinner} Copying: {msg}")?);
-            pb.set_message("Starting...");
+            "DISABLED"
         }
-
-        fs::create_dir_all(destination)?;
-
-        for entry in WalkDir::new(source) {
-            let entry = entry?;
-            let src_path = entry.path();
-
-            if !src_path.is_file() {
-                continue;
-            }
-
-            let rel_path = src_path.strip_prefix(source)?;
-            let dst_path = destination.join(rel_path);
-
-            if dst_path.exists() && !overwrite {
-                if let Some(ref pb) = pb {
-                    pb.set_message(format!("Skipping: {} (exists)", rel_path.display()));
-                }
-                continue;
-            }
-
-            if let Some(parent) = dst_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-
-            fs::copy(src_path, &dst_path)?;
-
-            if let Some(ref pb) = pb {
-                pb.set_message(format!("Copied: {}", rel_path.display()));
-            }
-        }
-
-        if let Some(pb) = pb {
-            pb.finish_with_message("Copy completed");
-        }
-
-        Ok(())
     }
 }
 
@@ -711,9 +693,9 @@ mod tests {
     #[tokio::test]
     async fn test_scan_paths_empty() {
         let temp_dir = tempdir().unwrap();
-        let storage = BackupStorage::new(temp_dir.path().to_str().unwrap());
+        let storage = crate::storage::BackupStorage::new(temp_dir.path().to_str().unwrap());
         let config = Config::default();
-        let engine = BackupEngine::new(storage, config);
+        let engine = BackupEngine::new(storage, config).unwrap();
 
         let files = engine
             .scan_paths(&[temp_dir.path().to_path_buf()], &[], false)
@@ -729,9 +711,9 @@ mod tests {
         let file_path = temp_dir.path().join("test.txt");
         fs::write(&file_path, "test content").unwrap();
 
-        let storage = BackupStorage::new(temp_dir.path().to_str().unwrap());
+        let storage = crate::storage::BackupStorage::new(temp_dir.path().to_str().unwrap());
         let config = Config::default();
-        let engine = BackupEngine::new(storage, config);
+        let engine = BackupEngine::new(storage, config).unwrap();
 
         let files = engine
             .scan_paths(&[temp_dir.path().to_path_buf()], &[], false)
@@ -761,9 +743,9 @@ mod tests {
         let content = "Hello, World!";
         fs::write(&file_path, content)?;
         
-        let storage = BackupStorage::new(temp_dir.path().to_str().unwrap());
+        let storage = crate::storage::BackupStorage::new(temp_dir.path().to_str().unwrap());
         let config = Config::default();
-        let engine = BackupEngine::new(storage, config);
+        let engine = BackupEngine::new(storage, config).unwrap();
 
         let file_info = engine.get_file_info(&file_path).await?;
         
@@ -800,9 +782,9 @@ mod tests {
         fs::write(&file1, "content 1")?;
         fs::write(&file2, "content 2")?;
 
-        let storage = BackupStorage::new(temp_dir.path().to_str().unwrap());
+        let storage = crate::storage::BackupStorage::new(temp_dir.path().to_str().unwrap());
         let config = Config::default();
-        let engine = BackupEngine::new(storage, config);
+        let engine = BackupEngine::new(storage, config).unwrap();
 
         let files = vec![
             FileInfo {
@@ -841,9 +823,9 @@ mod tests {
         fs::write(&file1, "include")?;
         fs::write(&file2, "exclude")?;
 
-        let storage = BackupStorage::new(temp_dir.path().to_str().unwrap());
+        let storage = crate::storage::BackupStorage::new(temp_dir.path().to_str().unwrap());
         let config = Config::default();
-        let engine = BackupEngine::new(storage, config);
+        let engine = BackupEngine::new(storage, config).unwrap();
 
         let files = engine.scan_paths(
             &[temp_dir.path().to_path_buf()],

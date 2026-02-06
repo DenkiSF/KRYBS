@@ -5,44 +5,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Расписание для конкретного профиля
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProfileSchedule {
-    /// Интервал полного бэкапа в днях
-    #[serde(default = "default_full_days")]
-    pub full_days: u32,
-
-    /// Интервал снэпшотов в часах
-    #[serde(default = "default_snapshot_hours")]
-    pub snapshot_hours: u32,
-}
-
-fn default_full_days() -> u32 {
-    30
-}
-fn default_snapshot_hours() -> u32 {
-    6
-}
-
-/// Политика хранения для конкретного профиля
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProfileRetention {
-    /// Хранение полных бэкапов в днях
-    #[serde(default = "default_retention_full")]
-    pub full_days: u32,
-
-    /// Хранение снэпшотов в днях
-    #[serde(default = "default_retention_snapshot")]
-    pub snapshot_days: u32,
-}
-
-fn default_retention_full() -> u32 {
-    90
-}
-fn default_retention_snapshot() -> u32 {
-    30
-}
-
 /// Профиль бэкапа - любой путь или сервис
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
@@ -56,13 +18,21 @@ pub struct Profile {
     #[serde(default)]
     pub exclude: Vec<String>,
 
-    /// Расписание профиля (опционально)
-    #[serde(default)]
-    pub schedule: Option<ProfileSchedule>,
+    /// Использовать шифрование для этого профиля (по умолчанию true)
+    #[serde(default = "default_encrypt")]
+    pub encrypt: bool,
 
-    /// Политика хранения профиля (опционально)
-    #[serde(default)]
-    pub retention: Option<ProfileRetention>,
+    /// Уровень сжатия (0-9, где 0 - нет сжатия, 9 - максимальное)
+    #[serde(default = "default_compression")]
+    pub compression: u8,
+}
+
+fn default_encrypt() -> bool {
+    true
+}
+
+fn default_compression() -> u8 {
+    6
 }
 
 impl Profile {
@@ -74,83 +44,16 @@ impl Profile {
             name,
             paths: vec![path.to_path_buf()],
             exclude: Vec::new(),
-            schedule: None,
-            retention: None,
+            encrypt: true,
+            compression: 6,
         }
     }
-
-    /// Получает интервал полного бэкапа
-    pub fn get_full_interval(&self, global_schedule: &GlobalSchedule) -> u32 {
-        self.schedule
-            .as_ref()
-            .map(|s| s.full_days)
-            .unwrap_or(global_schedule.full_interval_days)
-    }
-
-    /// Получает интервал снэпшотов
-    pub fn get_snapshot_interval(&self, global_schedule: &GlobalSchedule) -> u32 {
-        self.schedule
-            .as_ref()
-            .map(|s| s.snapshot_hours)
-            .unwrap_or(global_schedule.snapshot_interval_hours)
-    }
-
-    /// Получает политику хранения полных бэкапов
-    pub fn get_full_retention(&self, global_retention: &GlobalRetention) -> u32 {
-        self.retention
-            .as_ref()
-            .map(|r| r.full_days)
-            .unwrap_or(global_retention.full_days)
-    }
-
-    /// Получает политику хранения снэпшотов
-    pub fn get_snapshot_retention(&self, global_retention: &GlobalRetention) -> u32 {
-        self.retention
-            .as_ref()
-            .map(|r| r.snapshot_days)
-            .unwrap_or(global_retention.snapshot_days)
-    }
 }
 
-/// Глобальное расписание (значения по умолчанию)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GlobalSchedule {
-    /// Глобальный интервал полного бэкапа в днях
-    #[serde(default = "default_global_full_days")]
-    pub full_interval_days: u32,
-
-    /// Глобальный интервал снэпшотов в часах
-    #[serde(default = "default_global_snapshot_hours")]
-    pub snapshot_interval_hours: u32,
-}
-
-fn default_global_full_days() -> u32 {
-    60
-}
-fn default_global_snapshot_hours() -> u32 {
-    24
-}
-
-/// Глобальная политика хранения
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GlobalRetention {
-    /// Глобальное хранение полных бэкапов в днях
-    #[serde(default = "default_global_full_days")]
-    pub full_days: u32,
-
-    /// Глобальное хранение снэпшотов в днях
-    #[serde(default = "default_global_snapshot_days")]
-    pub snapshot_days: u32,
-}
-
-fn default_global_snapshot_days() -> u32 {
-    180
-}
-
-/// Криптография (структура оставлена для совместимости, но не используется)
+/// Конфигурация шифрования "Кузнечик"
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CryptoConfig {
-    /// Путь к мастер-ключу
+    /// Путь к мастер-ключу шифрования "Кузнечик" (256 бит)
     #[serde(default = "default_master_key_path")]
     pub master_key_path: PathBuf,
 
@@ -162,9 +65,17 @@ pub struct CryptoConfig {
     #[serde(default = "default_chunk_size")]
     pub chunk_size: usize,
 
-    /// Версия формата шифрования
-    #[serde(default = "default_crypto_version")]
-    pub version: u8,
+    /// Режим шифрования (CBC, CTR, OFB, CFB)
+    #[serde(default = "default_cipher_mode")]
+    pub cipher_mode: String,
+
+    /// Использовать KDF (Key Derivation Function) для усиления ключа
+    #[serde(default = "default_use_kdf")]
+    pub use_kdf: bool,
+
+    /// Размер соли для KDF (байты)
+    #[serde(default = "default_salt_size")]
+    pub salt_size: usize,
 }
 
 fn default_master_key_path() -> PathBuf {
@@ -174,11 +85,21 @@ fn default_master_key_path() -> PathBuf {
 fn default_delete_plain() -> bool {
     true
 }
+
 fn default_chunk_size() -> usize {
-    1024 * 1024
-} // 1MB
-fn default_crypto_version() -> u8 {
-    1
+    1024 * 1024 // 1MB
+}
+
+fn default_cipher_mode() -> String {
+    "CBC".to_string()
+}
+
+fn default_use_kdf() -> bool {
+    true
+}
+
+fn default_salt_size() -> usize {
+    32
 }
 
 /// Основная конфигурация
@@ -188,21 +109,53 @@ pub struct Config {
     #[serde(default)]
     pub core: CoreConfig,
 
-    /// Глобальное расписание (значения по умолчанию для профилей)
-    #[serde(default)]
-    pub schedule: GlobalSchedule,
-
-    /// Глобальная политика хранения (значения по умолчанию для профилей)
-    #[serde(default)]
-    pub retention: GlobalRetention,
-
-    /// Криптография (структура оставлена для совместимости)
+    /// Криптография с алгоритмом "Кузнечик"
     #[serde(default)]
     pub crypto: CryptoConfig,
 
     /// Профили бэкапа
     #[serde(default)]
     pub profiles: Vec<Profile>,
+
+    /// Настройки автоматического обслуживания
+    #[serde(default)]
+    pub maintenance: MaintenanceConfig,
+}
+
+/// Настройки автоматического обслуживания
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaintenanceConfig {
+    /// Автоматически удалять старые бэкапы (в днях)
+    #[serde(default = "default_max_age_days")]
+    pub max_age_days: i64,
+
+    /// Хранить не более N бэкапов
+    #[serde(default = "default_max_backups")]
+    pub max_backups: usize,
+
+    /// Проверять целостность бэкапов при запуске
+    #[serde(default = "default_check_integrity")]
+    pub check_integrity: bool,
+
+    /// Сжимать старые бэкапы (уровень сжатия 0-9)
+    #[serde(default = "default_compress_old")]
+    pub compress_old: Option<u8>,
+}
+
+fn default_max_age_days() -> i64 {
+    30
+}
+
+fn default_max_backups() -> usize {
+    10
+}
+
+fn default_check_integrity() -> bool {
+    true
+}
+
+fn default_compress_old() -> Option<u8> {
+    Some(9)
 }
 
 /// Глобальные настройки
@@ -211,34 +164,72 @@ pub struct CoreConfig {
     /// Директория для хранения бэкапов
     #[serde(default = "default_backup_dir")]
     pub backup_dir: PathBuf,
+
+    /// Включить логирование
+    #[serde(default = "default_enable_logging")]
+    pub enable_logging: bool,
+
+    /// Уровень детализации логов (error, warn, info, debug, trace)
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+
+    /// Максимальный размер лог-файла (в мегабайтах)
+    #[serde(default = "default_max_log_size")]
+    pub max_log_size: u64,
+
+    /// Сохранять ли незашифрованные бэкапы при ошибке шифрования
+    #[serde(default = "default_keep_failed")]
+    pub keep_failed: bool,
+
+    /// Путь для временных файлов
+    #[serde(default = "default_temp_dir")]
+    pub temp_dir: PathBuf,
 }
 
 fn default_backup_dir() -> PathBuf {
-    PathBuf::from("/backup")
+    PathBuf::from("/var/backups/krybs")
+}
+
+fn default_enable_logging() -> bool {
+    true
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+fn default_max_log_size() -> u64 {
+    100 // 100MB
+}
+
+fn default_keep_failed() -> bool {
+    false
+}
+
+fn default_temp_dir() -> PathBuf {
+    PathBuf::from("/tmp/krybs")
 }
 
 impl Default for CoreConfig {
     fn default() -> Self {
         Self {
             backup_dir: default_backup_dir(),
+            enable_logging: default_enable_logging(),
+            log_level: default_log_level(),
+            max_log_size: default_max_log_size(),
+            keep_failed: default_keep_failed(),
+            temp_dir: default_temp_dir(),
         }
     }
 }
 
-impl Default for GlobalSchedule {
+impl Default for MaintenanceConfig {
     fn default() -> Self {
         Self {
-            full_interval_days: default_global_full_days(),
-            snapshot_interval_hours: default_global_snapshot_hours(),
-        }
-    }
-}
-
-impl Default for GlobalRetention {
-    fn default() -> Self {
-        Self {
-            full_days: default_global_full_days(),
-            snapshot_days: default_global_snapshot_days(),
+            max_age_days: default_max_age_days(),
+            max_backups: default_max_backups(),
+            check_integrity: default_check_integrity(),
+            compress_old: default_compress_old(),
         }
     }
 }
@@ -249,7 +240,9 @@ impl Default for CryptoConfig {
             master_key_path: default_master_key_path(),
             delete_plain: default_delete_plain(),
             chunk_size: default_chunk_size(),
-            version: default_crypto_version(),
+            cipher_mode: default_cipher_mode(),
+            use_kdf: default_use_kdf(),
+            salt_size: default_salt_size(),
         }
     }
 }
@@ -258,10 +251,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             core: CoreConfig::default(),
-            schedule: GlobalSchedule::default(),
-            retention: GlobalRetention::default(),
             crypto: CryptoConfig::default(),
             profiles: Vec::new(),
+            maintenance: MaintenanceConfig::default(),
         }
     }
 }
@@ -339,73 +331,66 @@ impl Config {
             )));
         }
 
-        // Проверка интервалов глобального расписания
-        if self.schedule.full_interval_days == 0 {
-            return Err(ConfigError::Invalid(
-                "full_interval_days must be greater than 0".to_string(),
-            ));
+        // Проверка temp_dir
+        if !self.core.temp_dir.is_absolute() {
+            return Err(ConfigError::Invalid(format!(
+                "temp_dir must be absolute path: {}",
+                self.core.temp_dir.display()
+            )));
         }
 
-        if self.schedule.snapshot_interval_hours == 0 {
-            return Err(ConfigError::Invalid(
-                "snapshot_interval_hours must be greater than 0".to_string(),
-            ));
+        // Проверка crypto.master_key_path
+        if !self.crypto.master_key_path.is_absolute() {
+            return Err(ConfigError::Invalid(format!(
+                "master_key_path must be absolute path: {}",
+                self.crypto.master_key_path.display()
+            )));
         }
 
-        // Проверка глобальной политики хранения
-        if self.retention.full_days == 0 {
-            return Err(ConfigError::Invalid(
-                "full_days must be greater than 0".to_string(),
-            ));
+        // Проверка допустимого режима шифрования
+        let valid_modes = ["CBC", "CTR", "OFB", "CFB"];
+        if !valid_modes.contains(&self.crypto.cipher_mode.as_str()) {
+            return Err(ConfigError::Invalid(format!(
+                "Invalid cipher mode: {}. Must be one of: {:?}",
+                self.crypto.cipher_mode, valid_modes
+            )));
         }
 
-        if self.retention.snapshot_days == 0 {
-            return Err(ConfigError::Invalid(
-                "snapshot_days must be greater than 0".to_string(),
-            ));
-        }
-
-        // Проверка профилей
+        // Проверка уровня сжатия профилей
         for profile in &self.profiles {
+            if profile.compression > 9 {
+                return Err(ConfigError::Invalid(format!(
+                    "Profile '{}' compression level must be between 0-9",
+                    profile.name
+                )));
+            }
+
             if profile.paths.is_empty() {
                 return Err(ConfigError::Invalid(format!(
                     "Profile '{}' has no paths defined",
                     profile.name
                 )));
             }
+        }
 
-            // Проверяем расписание профиля, если указано
-            if let Some(schedule) = &profile.schedule {
-                if schedule.full_days == 0 {
-                    return Err(ConfigError::Invalid(format!(
-                        "Profile '{}': full_days must be greater than 0",
-                        profile.name
-                    )));
-                }
+        // Проверка настроек обслуживания
+        if self.maintenance.max_age_days < 0 {
+            return Err(ConfigError::Invalid(
+                "max_age_days cannot be negative".to_string(),
+            ));
+        }
 
-                if schedule.snapshot_hours == 0 {
-                    return Err(ConfigError::Invalid(format!(
-                        "Profile '{}': snapshot_hours must be greater than 0",
-                        profile.name
-                    )));
-                }
-            }
+        if self.maintenance.max_backups == 0 {
+            return Err(ConfigError::Invalid(
+                "max_backups must be greater than 0".to_string(),
+            ));
+        }
 
-            // Проверяем политику хранения профиля, если указано
-            if let Some(retention) = &profile.retention {
-                if retention.full_days == 0 {
-                    return Err(ConfigError::Invalid(format!(
-                        "Profile '{}': full_days must be greater than 0",
-                        profile.name
-                    )));
-                }
-
-                if retention.snapshot_days == 0 {
-                    return Err(ConfigError::Invalid(format!(
-                        "Profile '{}': snapshot_days must be greater than 0",
-                        profile.name
-                    )));
-                }
+        if let Some(compress) = self.maintenance.compress_old {
+            if compress > 9 {
+                return Err(ConfigError::Invalid(
+                    "compress_old level must be between 0-9".to_string(),
+                ));
             }
         }
 
@@ -439,24 +424,24 @@ impl Config {
             self.crypto.master_key_path.display().to_string(),
         );
         info.insert(
-            "global_full_interval".to_string(),
-            self.schedule.full_interval_days.to_string(),
+            "cipher_mode".to_string(),
+            self.crypto.cipher_mode.clone(),
         );
         info.insert(
-            "global_snapshot_interval".to_string(),
-            self.schedule.snapshot_interval_hours.to_string(),
-        );
-        info.insert(
-            "global_full_retention".to_string(),
-            self.retention.full_days.to_string(),
-        );
-        info.insert(
-            "global_snapshot_retention".to_string(),
-            self.retention.snapshot_days.to_string(),
+            "use_kdf".to_string(),
+            self.crypto.use_kdf.to_string(),
         );
         info.insert(
             "profiles_count".to_string(),
             self.profiles.len().to_string(),
+        );
+        info.insert(
+            "max_age_days".to_string(),
+            self.maintenance.max_age_days.to_string(),
+        );
+        info.insert(
+            "max_backups".to_string(),
+            self.maintenance.max_backups.to_string(),
         );
 
         if !self.profiles.is_empty() {
@@ -465,6 +450,25 @@ impl Config {
         }
 
         info
+    }
+
+    /// Проверяет, доступен ли ключ шифрования
+    pub fn encryption_available(&self) -> bool {
+        self.crypto.master_key_path.exists()
+    }
+
+    /// Возвращает путь к ключу шифрования
+    pub fn get_key_path(&self) -> &Path {
+        &self.crypto.master_key_path
+    }
+
+    /// Получает настройки шифрования для профиля
+    pub fn get_profile_encryption_settings(&self, profile_name: &str) -> (bool, u8) {
+        if let Some(profile) = self.find_profile(profile_name) {
+            (profile.encrypt, profile.compression)
+        } else {
+            (true, 6) // Значения по умолчанию
+        }
     }
 }
 
@@ -492,55 +496,48 @@ fn get_config_paths(custom_path: Option<&Path>) -> Vec<PathBuf> {
 }
 
 /// Инициализирует конфигурационный файл с примерами
-pub fn init_config(output_path: Option<&Path>, interactive: bool, _defaults: bool) -> Result<()> {
+pub fn init_config(output_path: Option<&Path>, interactive: bool, defaults: bool) -> Result<()> {
     let mut config = Config::default();
 
-    // Добавляем примеры профилей
-    config.profiles = vec![
-        Profile {
-            name: "postgres".to_string(),
-            paths: vec![
-                PathBuf::from("/var/lib/postgresql"),
-                PathBuf::from("/etc/postgresql"),
-            ],
-            exclude: vec!["*.wal".to_string()],
-            schedule: Some(ProfileSchedule {
-                full_days: 30,
-                snapshot_hours: 6,
-            }),
-            retention: Some(ProfileRetention {
-                full_days: 90,
-                snapshot_days: 30,
-            }),
-        },
-        Profile {
-            name: "/home/docs".to_string(),
-            paths: vec![PathBuf::from("/home/user/docs")],
-            exclude: vec!["cache/".to_string()],
-            schedule: None,
-            retention: None,
-        },
-        Profile {
-            name: "nginx-service".to_string(),
-            paths: vec![PathBuf::from("/etc/nginx"), PathBuf::from("/var/log/nginx")],
-            exclude: vec!["*.tmp".to_string(), "cache/".to_string()],
-            schedule: Some(ProfileSchedule {
-                full_days: 7,
-                snapshot_hours: 12,
-            }),
-            retention: Some(ProfileRetention {
-                full_days: 30,
-                snapshot_days: 7,
-            }),
-        },
-        Profile {
-            name: "system-logs".to_string(),
-            paths: vec![PathBuf::from("/var/log")],
-            exclude: vec!["*.tmp".to_string(), "*.temp".to_string()],
-            schedule: None,
-            retention: None,
-        },
-    ];
+    if defaults {
+        // Используем только значения по умолчанию
+        config.profiles = Vec::new();
+    } else {
+        // Добавляем примеры профилей
+        config.profiles = vec![
+            Profile {
+                name: "postgres".to_string(),
+                paths: vec![
+                    PathBuf::from("/var/lib/postgresql"),
+                    PathBuf::from("/etc/postgresql"),
+                ],
+                exclude: vec!["*.wal".to_string()],
+                encrypt: true,
+                compression: 6,
+            },
+            Profile {
+                name: "/home/docs".to_string(),
+                paths: vec![PathBuf::from("/home/user/docs")],
+                exclude: vec!["cache/".to_string()],
+                encrypt: true,
+                compression: 7,
+            },
+            Profile {
+                name: "nginx-service".to_string(),
+                paths: vec![PathBuf::from("/etc/nginx"), PathBuf::from("/var/log/nginx")],
+                exclude: vec!["*.tmp".to_string(), "cache/".to_string()],
+                encrypt: true,
+                compression: 5,
+            },
+            Profile {
+                name: "system-logs".to_string(),
+                paths: vec![PathBuf::from("/var/log")],
+                exclude: vec!["*.tmp".to_string(), "*.temp".to_string()],
+                encrypt: false, // Логи обычно не требуют шифрования
+                compression: 9,
+            },
+        ];
+    }
 
     // Определяем путь для сохранения
     let save_path = match output_path {
@@ -558,42 +555,22 @@ pub fn init_config(output_path: Option<&Path>, interactive: bool, _defaults: boo
     println!("Creating configuration file at: {}", save_path.display());
     println!("Configuration:");
     println!("  Backup directory: {}", config.core.backup_dir.display());
+    println!("  Temp directory: {}", config.core.temp_dir.display());
     println!(
         "  Master key path: {}",
         config.crypto.master_key_path.display()
     );
     println!("  Delete plaintext: {}", config.crypto.delete_plain);
-    println!(
-        "  Global full interval: {} days",
-        config.schedule.full_interval_days
-    );
-    println!(
-        "  Global snapshot interval: {} hours",
-        config.schedule.snapshot_interval_hours
-    );
-    println!(
-        "  Global full retention: {} days",
-        config.retention.full_days
-    );
-    println!(
-        "  Global snapshot retention: {} days",
-        config.retention.snapshot_days
-    );
-    println!("  Example profiles ({}):", config.profiles.len());
-
-    for profile in &config.profiles {
-        println!("    - {} ({} paths)", profile.name, profile.paths.len());
-        if let Some(schedule) = &profile.schedule {
-            println!(
-                "      Schedule: full every {} days, snapshot every {} hours",
-                schedule.full_days, schedule.snapshot_hours
-            );
-        }
-        if let Some(retention) = &profile.retention {
-            println!(
-                "      Retention: full {} days, snapshot {} days",
-                retention.full_days, retention.snapshot_days
-            );
+    println!("  Cipher mode: {}", config.crypto.cipher_mode);
+    println!("  Use KDF: {}", config.crypto.use_kdf);
+    println!("  Max age days: {}", config.maintenance.max_age_days);
+    println!("  Max backups: {}", config.maintenance.max_backups);
+    
+    if !config.profiles.is_empty() {
+        println!("  Example profiles ({}):", config.profiles.len());
+        for profile in &config.profiles {
+            println!("    - {} ({} paths, encrypt: {}, compression: {})", 
+                profile.name, profile.paths.len(), profile.encrypt, profile.compression);
         }
     }
 
@@ -612,12 +589,168 @@ pub fn init_config(output_path: Option<&Path>, interactive: bool, _defaults: boo
         }
     }
 
+    // Создаем директории
+    if let Some(parent) = save_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    
+    // Создаем директорию для ключа если нужно
+    if let Some(key_parent) = config.crypto.master_key_path.parent() {
+        fs::create_dir_all(key_parent)?;
+    }
+    
+    // Создаем директорию для бэкапов
+    fs::create_dir_all(&config.core.backup_dir)?;
+    
+    // Создаем директорию для временных файлов
+    fs::create_dir_all(&config.core.temp_dir)?;
+
+    // Сохраняем конфигурацию
     config
         .save(&save_path)
         .context("Failed to save configuration")?;
 
-    println!("Configuration saved successfully!");
-    println!("You can edit it manually at: {}", save_path.display());
+    println!("\n[SUCCESS] Configuration saved successfully!");
+    println!("  Config file: {}", save_path.display());
+    println!("  Backup directory: {}", config.core.backup_dir.display());
+    println!("  Temp directory: {}", config.core.temp_dir.display());
+    println!("\n[IMPORTANT] Next steps:");
+    println!("  1. Generate encryption key: krybs keygen --output {}", 
+             config.crypto.master_key_path.display());
+    println!("  2. Test backup: krybs backup --profile system-logs");
+    println!("  3. Check status: krybs status");
+    
+    if !config.profiles.is_empty() {
+        println!("\nAvailable profiles:");
+        for profile in &config.profiles {
+            println!("  - {}: {} paths", profile.name, profile.paths.len());
+        }
+    }
 
     Ok(())
+}
+
+/// Вспомогательная функция для получения значения по ключу
+pub fn get_env_or_default(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Проверяет существование конфигурационного файла
+pub fn config_exists(path: Option<&Path>) -> bool {
+    let paths = get_config_paths(path);
+    paths.iter().any(|p| p.exists())
+}
+
+/// Загружает конфигурацию или создает новую с настройками по умолчанию
+pub fn load_or_create(config_path: Option<&Path>) -> Result<Config> {
+    match Config::load(config_path) {
+        Ok(config) => Ok(config),
+        Err(ConfigError::NotFound) => {
+            println!("Configuration file not found. Creating default configuration...");
+            let config = Config::default();
+            Ok(config)
+        }
+        Err(e) => Err(anyhow::anyhow!("Failed to load configuration: {}", e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_config_default() {
+        let config = Config::default();
+        assert_eq!(config.core.backup_dir, PathBuf::from("/var/backups/krybs"));
+        assert_eq!(config.crypto.master_key_path, PathBuf::from("/etc/krybs/master.key"));
+        assert_eq!(config.crypto.cipher_mode, "CBC");
+        assert!(config.crypto.use_kdf);
+    }
+
+    #[test]
+    fn test_profile_for_path() {
+        let profile = Profile::for_path(&PathBuf::from("/home/user"));
+        assert_eq!(profile.name, "/home/user");
+        assert_eq!(profile.paths.len(), 1);
+        assert!(profile.encrypt);
+        assert_eq!(profile.compression, 6);
+    }
+
+    #[test]
+    fn test_config_validation() -> Result<()> {
+        let mut config = Config::default();
+        
+        // Должно пройти валидацию
+        config.validate()?;
+        
+        // Неправильный режим шифрования
+        config.crypto.cipher_mode = "INVALID".to_string();
+        assert!(config.validate().is_err());
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_save_and_load() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let config_path = temp_dir.path().join("config.toml");
+        
+        let mut config = Config::default();
+        config.core.backup_dir = temp_dir.path().join("backups").to_path_buf();
+        
+        config.save(&config_path)?;
+        assert!(config_path.exists());
+        
+        let loaded = Config::load_from_file(&config_path)?;
+        assert_eq!(loaded.core.backup_dir, config.core.backup_dir);
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_profile() {
+        let mut config = Config::default();
+        
+        let profile = Profile {
+            name: "test".to_string(),
+            paths: vec![PathBuf::from("/test")],
+            exclude: vec![],
+            encrypt: true,
+            compression: 6,
+        };
+        
+        config.profiles.push(profile);
+        
+        assert!(config.find_profile("test").is_some());
+        assert!(config.find_profile("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_config_info() {
+        let config = Config::default();
+        let info = config.info();
+        
+        assert!(info.contains_key("backup_dir"));
+        assert!(info.contains_key("master_key_path"));
+        assert!(info.contains_key("profiles_count"));
+    }
+
+    #[test]
+    fn test_encryption_available() {
+        let config = Config::default();
+        
+        // Ключа по умолчанию нет
+        assert!(!config.encryption_available());
+    }
+
+    #[test]
+    fn test_get_config_paths() {
+        let paths = get_config_paths(None);
+        assert!(paths.len() >= 3);
+        
+        let custom = PathBuf::from("/custom/config.toml");
+        let paths_with_custom = get_config_paths(Some(&custom));
+        assert_eq!(paths_with_custom[0], custom);
+    }
 }

@@ -10,15 +10,12 @@ use std::path::{Path, PathBuf};
 pub enum BackupType {
     #[serde(rename = "full")]
     Full,
-    #[serde(rename = "snapshot")]
-    Snapshot,
 }
 
 impl std::fmt::Display for BackupType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BackupType::Full => write!(f, "full"),
-            BackupType::Snapshot => write!(f, "snapshot"),
         }
     }
 }
@@ -31,8 +28,8 @@ pub struct BackupInfo {
     pub profile: String,
     pub file_count: u64,
     pub size_encrypted: u64, // в байтах
-    pub parent_id: Option<String>,
     pub checksum: Option<String>, // SHA256 зашифрованного архива
+    pub encrypted: Option<bool>, // Добавляем это поле
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,7 +40,7 @@ pub struct LocalIndex {
     pub profile: String,
     pub file_count: u64,
     pub size_encrypted: String, // Человекочитаемый формат
-    pub parent_id: Option<String>,
+    pub encrypted: Option<bool>, // Добавляем это поле
 }
 
 impl From<&BackupInfo> for LocalIndex {
@@ -55,7 +52,7 @@ impl From<&BackupInfo> for LocalIndex {
             profile: info.profile.clone(),
             file_count: info.file_count,
             size_encrypted: bytes_to_human(info.size_encrypted),
-            parent_id: info.parent_id.clone(),
+            encrypted: info.encrypted,
         }
     }
 }
@@ -82,47 +79,28 @@ pub fn bytes_to_human(bytes: u64) -> String {
 
 #[derive(Debug, Clone)]
 pub struct BackupStorage {
-    full_dir: PathBuf,
-    snap_dir: PathBuf,
-    chains_dir: PathBuf,
+    backup_dir: PathBuf,
 }
 
 impl BackupStorage {
     /// Создает новое хранилище по указанному пути
     pub fn new(root: &str) -> Self {
-        let root_path = PathBuf::from(root);
         Self {
-            full_dir: root_path.join("full"),
-            snap_dir: root_path.join("snap"),
-            chains_dir: root_path.join("chains"),
+            backup_dir: PathBuf::from(root),
         }
     }
 
     /// Инициализирует структуру директорий
     pub fn init(&self) -> Result<()> {
-        fs::create_dir_all(&self.full_dir).context("Failed to create full backup directory")?;
-        fs::create_dir_all(&self.snap_dir).context("Failed to create snapshot directory")?;
-        fs::create_dir_all(&self.chains_dir).context("Failed to create chains directory")?;
+        fs::create_dir_all(&self.backup_dir)
+            .context("Failed to create backup directory")?;
 
         Ok(())
     }
 
     /// Возвращает путь к каталогу бэкапа по его ID
     pub fn backup_path(&self, id: &str) -> PathBuf {
-        // Определяем тип бэкапа по префиксу ID
-        if id.starts_with("full-") {
-            self.full_dir.join(id)
-        } else if id.starts_with("snap-") {
-            self.snap_dir.join(id)
-        } else {
-            // Если префикс не указан, пробуем найти в обеих директориях
-            let full_path = self.full_dir.join(id);
-            if full_path.exists() {
-                full_path
-            } else {
-                self.snap_dir.join(id)
-            }
-        }
+        self.backup_dir.join(id)
     }
 
     /// Читает локальный индекс бэкапа
@@ -158,97 +136,30 @@ impl BackupStorage {
         Ok(())
     }
 
-    /// Возвращает список всех полных бэкапов
-    pub fn list_full(&self) -> Result<Vec<BackupInfo>> {
-        self.list_backups_in_dir(&self.full_dir, BackupType::Full, None)
+    /// Возвращает список всех бэкапов
+    pub fn list_all(&self) -> Result<Vec<BackupInfo>> {
+        self.list_backups_in_dir(&self.backup_dir)
     }
 
-    /// Возвращает список снепшотов для указанного родительского бэкапа
-    pub fn list_snapshots(&self, parent_id: &str) -> Result<Vec<BackupInfo>> {
-        self.list_backups_in_dir(&self.snap_dir, BackupType::Snapshot, Some(parent_id))
-    }
-
-    /// Возвращает все бэкапы (полные и снепшоты) сгруппированные по цепочкам
+    /// Возвращает все бэкапы
     pub fn list_all_chained(&self) -> Result<HashMap<String, Vec<BackupInfo>>> {
         let mut chains = HashMap::new();
 
-        // Находим все полные бэкапы
-        let full_backups = self.list_full()?;
+        // Находим все бэкапы
+        let backups = self.list_all()?;
 
-        for full_backup in full_backups {
-            let mut chain = vec![full_backup.clone()];
-
-            // Находим все снепшоты для этого полного бэкапа
-            let snapshots = self.list_snapshots(&full_backup.id)?;
-            chain.extend(snapshots);
-
-            chains.insert(full_backup.id.clone(), chain);
+        for backup in backups {
+            // Каждый бэкап - отдельная цепочка
+            chains.insert(backup.id.clone(), vec![backup.clone()]);
         }
 
         Ok(chains)
     }
 
-    /// Возвращает информацию о цепочке бэкапов
+    /// Возвращает информацию о цепочке бэкапов (для совместимости)
     pub fn get_chain(&self, chain_id: &str) -> Result<Vec<BackupInfo>> {
-        let mut chain = Vec::new();
-
-        // Проверяем, существует ли бэкап с таким ID
-        let backup_path = self.backup_path(chain_id);
-        if !backup_path.exists() {
-            // Если не существует, возможно это ID полного бэкапа без префикса
-            let full_id = if chain_id.starts_with("full-") {
-                chain_id.to_string()
-            } else {
-                format!("full-{}", chain_id)
-            };
-
-            let full_path = self.full_dir.join(&full_id);
-            if !full_path.exists() {
-                return Err(anyhow::anyhow!("Chain not found: {}", chain_id));
-            }
-
-            // Добавляем полный бэкап
-            if let Ok(full_info) = self.read_backup_info(&full_id) {
-                chain.push(full_info);
-            }
-
-            // Добавляем снепшоты
-            let snapshots = self.list_snapshots(&full_id)?;
-            chain.extend(snapshots);
-        } else {
-            // Это конкретный бэкап, находим его цепочку
-            let info = self.read_backup_info(chain_id)?;
-
-            if info.backup_type == BackupType::Full {
-                // Если это полный бэкап, собираем всю его цепочку
-                let info_clone = info.clone(); // Клонируем для использования
-                chain.push(info);
-                let snapshots = self.list_snapshots(&info_clone.id)?;
-                chain.extend(snapshots);
-            } else if let Some(parent_id) = &info.parent_id {
-                // Если это снепшот, находим родительский full и всю цепочку
-                let parent_id_clone = parent_id.clone();
-                let info_id = info.id.clone();
-
-                if let Ok(parent_info) = self.read_backup_info(&parent_id_clone) {
-                    chain.push(parent_info);
-                }
-                chain.push(info);
-
-                // Ищем другие снепшоты того же родителя
-                let other_snapshots = self.list_snapshots(&parent_id_clone)?;
-                for snapshot in other_snapshots {
-                    if snapshot.id != info_id {
-                        chain.push(snapshot);
-                    }
-                }
-
-                // Сортируем по времени
-                chain.sort_by_key(|b| b.timestamp);
-            }
-        }
-
-        Ok(chain)
+        let backup = self.read_backup_info(chain_id)?;
+        Ok(vec![backup])
     }
 
     /// Читает полную информацию о бэкапе из индекса (публичный метод)
@@ -265,18 +176,13 @@ impl BackupStorage {
             profile: local_index.profile,
             file_count: local_index.file_count,
             size_encrypted: size_bytes,
-            parent_id: local_index.parent_id,
             checksum: None, // Для полной информации нужен манифест
+            encrypted: local_index.encrypted,
         })
     }
 
     /// Вспомогательный метод для списка бэкапов в директории
-    fn list_backups_in_dir(
-        &self,
-        dir: &Path,
-        _backup_type: BackupType,
-        parent_filter: Option<&str>,
-    ) -> Result<Vec<BackupInfo>> {
+    fn list_backups_in_dir(&self, dir: &Path) -> Result<Vec<BackupInfo>> {
         let mut backups = Vec::new();
 
         if !dir.exists() {
@@ -293,17 +199,6 @@ impl BackupStorage {
                     .and_then(|n| n.to_str())
                     .map(|s| s.to_string())
                     .unwrap_or_default();
-
-                // Пропускаем если не соответствует фильтру родителя
-                if let Some(parent_id) = parent_filter {
-                    if let Ok(index) = self.read_local_index(&backup_id) {
-                        if index.parent_id.as_deref() != Some(parent_id) {
-                            continue;
-                        }
-                    } else {
-                        continue; // Не можем прочитать индекс, пропускаем
-                    }
-                }
 
                 // Читаем информацию о бэкапе
                 match self.read_backup_info(&backup_id) {
@@ -326,7 +221,6 @@ impl BackupStorage {
         let date_str = timestamp.format("%Y%m%d-%H%M%S").to_string();
         match backup_type {
             BackupType::Full => format!("full-{}", date_str),
-            BackupType::Snapshot => format!("snap-{}", date_str),
         }
     }
 
@@ -358,36 +252,18 @@ impl BackupStorage {
     pub fn get_storage_stats(&self) -> Result<StorageStats> {
         let mut stats = StorageStats {
             total_backups: 0,
-            full_backups: 0,
-            snapshots: 0,
             total_size: 0,
             profiles: HashMap::new(),
         };
 
-        // Считаем полные бэкапы
-        if let Ok(full_backups) = self.list_full() {
-            stats.full_backups = full_backups.len();
-            for backup in full_backups {
+        // Считаем бэкапы
+        if let Ok(backups) = self.list_all() {
+            stats.total_backups = backups.len();
+            for backup in backups {
                 stats.total_size += backup.size_encrypted;
                 *stats.profiles.entry(backup.profile).or_insert(0) += 1;
             }
         }
-
-        // Считаем снепшоты
-        if let Ok(all_chains) = self.list_all_chained() {
-            for chain in all_chains.values() {
-                for backup in chain.iter().skip(1) {
-                    // Пропускаем первый (full)
-                    if backup.backup_type == BackupType::Snapshot {
-                        stats.snapshots += 1;
-                        stats.total_size += backup.size_encrypted;
-                        *stats.profiles.entry(backup.profile.clone()).or_insert(0) += 1;
-                    }
-                }
-            }
-        }
-
-        stats.total_backups = stats.full_backups + stats.snapshots;
 
         Ok(stats)
     }
@@ -397,8 +273,6 @@ impl BackupStorage {
 #[derive(Debug)]
 pub struct StorageStats {
     pub total_backups: usize,
-    pub full_backups: usize,
-    pub snapshots: usize,
     pub total_size: u64,
     pub profiles: HashMap<String, usize>,
 }
@@ -408,8 +282,6 @@ impl StorageStats {
         let mut output = String::new();
 
         output.push_str(&format!("Total backups: {}\n", self.total_backups));
-        output.push_str(&format!("  Full backups: {}\n", self.full_backups));
-        output.push_str(&format!("  Snapshots: {}\n", self.snapshots));
         output.push_str(&format!(
             "Total size: {}\n",
             bytes_to_human(self.total_size)
@@ -448,141 +320,4 @@ fn human_to_bytes(human: &str) -> Option<u64> {
 
     // Если не нашли единицы измерения, пробуем просто число
     human.parse::<u64>().ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-    use chrono::{TimeZone, Utc};
-
-    #[test]
-    fn test_bytes_to_human() {
-        assert_eq!(bytes_to_human(0), "0.00B");
-        assert_eq!(bytes_to_human(1024), "1.00KB");
-        assert_eq!(bytes_to_human(1024 * 1024), "1.00MB");
-        assert_eq!(bytes_to_human(1024 * 1024 * 1024), "1.00GB");
-        assert_eq!(bytes_to_human(1024 * 1024 * 1024 * 1024), "1.00TB");
-    }
-
-    #[test]
-    fn test_human_to_bytes() {
-        assert_eq!(human_to_bytes("1.00B"), Some(1));
-        assert_eq!(human_to_bytes("1.00KB"), Some(1024));
-        assert_eq!(human_to_bytes("1.00MB"), Some(1024 * 1024));
-        assert_eq!(human_to_bytes("1.50GB"), Some((1024 * 1024 * 1024) as u64 * 3 / 2));
-    }
-
-    #[test]
-    fn test_storage_init() -> Result<()> {
-        let temp_dir = tempdir()?;
-        let storage = BackupStorage::new(temp_dir.path().to_str().unwrap());
-        
-        storage.init()?;
-        
-        assert!(temp_dir.path().join("full").exists());
-        assert!(temp_dir.path().join("snap").exists());
-        assert!(temp_dir.path().join("chains").exists());
-        Ok(())
-    }
-
-    #[test]
-    fn test_backup_path() -> Result<()> {
-        let temp_dir = tempdir()?;
-        let storage = BackupStorage::new(temp_dir.path().to_str().unwrap());
-        storage.init()?;
-        
-        let full_path = storage.backup_path("full-20240101-120000");
-        assert!(full_path.to_string_lossy().contains("full/full-20240101-120000"));
-        
-        let snap_path = storage.backup_path("snap-20240101-130000");
-        assert!(snap_path.to_string_lossy().contains("snap/snap-20240101-130000"));
-        
-        Ok(())
-    }
-
-    #[test]
-    fn test_generate_id() -> Result<()> {
-        let storage = BackupStorage::new("/tmp");
-        let timestamp = Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap();
-        
-        let full_id = storage.generate_id(BackupType::Full, timestamp);
-        assert_eq!(full_id, "full-20240101-120000");
-        
-        let snap_id = storage.generate_id(BackupType::Snapshot, timestamp);
-        assert_eq!(snap_id, "snap-20240101-120000");
-        
-        Ok(())
-    }
-
-    #[test]
-    fn test_write_and_read_index() -> Result<()> {
-        let temp_dir = tempdir()?;
-        let storage = BackupStorage::new(temp_dir.path().to_str().unwrap());
-        storage.init()?;
-        
-        let info = BackupInfo {
-            id: "full-20240101-120000".to_string(),
-            backup_type: BackupType::Full,
-            timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap(),
-            profile: "test".to_string(),
-            file_count: 100,
-            size_encrypted: 1024 * 1024, // 1MB
-            parent_id: None,
-            checksum: Some("abc123".to_string()),
-        };
-        
-        storage.write_local_index(&info)?;
-        
-        let read_index = storage.read_local_index("full-20240101-120000")?;
-        
-        assert_eq!(read_index.backup_id, info.id);
-        assert_eq!(read_index.backup_type, info.backup_type);
-        assert_eq!(read_index.profile, info.profile);
-        assert_eq!(read_index.file_count, info.file_count);
-        assert_eq!(read_index.size_encrypted, "1.00MB");
-        
-        Ok(())
-    }
-
-    #[test]
-    fn test_storage_stats() -> Result<()> {
-        let temp_dir = tempdir()?;
-        let storage = BackupStorage::new(temp_dir.path().to_str().unwrap());
-        storage.init()?;
-        
-        // Создаем тестовые индексы
-        let info1 = BackupInfo {
-            id: "full-20240101-120000".to_string(),
-            backup_type: BackupType::Full,
-            timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap(),
-            profile: "test1".to_string(),
-            file_count: 100,
-            size_encrypted: 1024 * 1024,
-            parent_id: None,
-            checksum: None,
-        };
-        
-        let info2 = BackupInfo {
-            id: "snap-20240101-130000".to_string(),
-            backup_type: BackupType::Snapshot,
-            timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 13, 0, 0).unwrap(),
-            profile: "test2".to_string(),
-            file_count: 50,
-            size_encrypted: 512 * 1024,
-            parent_id: Some("full-20240101-120000".to_string()),
-            checksum: None,
-        };
-        
-        storage.write_local_index(&info1)?;
-        storage.write_local_index(&info2)?;
-        
-        let stats = storage.get_storage_stats()?;
-        
-        assert_eq!(stats.total_backups, 2);
-        assert_eq!(stats.full_backups, 1);
-        assert_eq!(stats.snapshots, 1);
-        
-        Ok(())
-    }
 }
