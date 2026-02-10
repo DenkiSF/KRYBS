@@ -125,7 +125,7 @@ impl BackupEngine {
 
         // Шаг 4: ШИФРОВАНИЕ архива (если включено)
         let (final_archive_path, final_archive_size, encrypted) = if self.crypto.is_enabled() {
-            let encrypted_path = tar_path.with_extension("tar.gz.enc");
+            let encrypted_path = tar_path.with_file_name("data.tar.gz.enc");
             println!("[INFO] Encrypting archive with Kuznechik cipher...");
             
             self.crypto.encrypt_file(&tar_path, &encrypted_path)
@@ -187,12 +187,27 @@ impl BackupEngine {
         println!("  Files:        {}", files.len());
         println!("  Original:     {}", crate::storage::bytes_to_human(total_size));
         println!("  Archive:      {}", crate::storage::bytes_to_human(final_archive_size));
-        let compression_ratio = if total_size > 0 {
-            (1.0 - final_archive_size as f64 / total_size as f64) * 100.0
+        
+        // Исправленный расчет сжатия
+        if total_size > 0 {
+            let ratio = final_archive_size as f64 / total_size as f64;
+            if final_archive_size < total_size {
+                let compression = (1.0 - ratio) * 100.0;
+                println!("  Compression:  +{:.1}% (saved)", compression);
+            } else if final_archive_size > total_size {
+                let increase = (ratio - 1.0) * 100.0;
+                if encrypted {
+                    println!("  Overhead:     {:.1}% (larger due to metadata + encryption)", increase);
+                } else {
+                    println!("  Overhead:     {:.1}% (larger due to metadata)", increase);
+                }
+            } else {
+                println!("  Compression:  0.0% (no change)");
+            }
         } else {
-            0.0
-        };
-        println!("  Compression:  {:.1}%", compression_ratio);
+            println!("  Compression:  N/A (empty files)");
+        }
+        
         println!("  Encryption:   {}", if encrypted { "✓ (Kuznechik)" } else { "✗" });
         println!("  Duration:     {:.1}s", duration_secs);
         println!("  Location:     {}", backup_dir.display());
@@ -473,10 +488,12 @@ impl BackupEngine {
         let backup_path = self.storage.backup_path(backup_id);
         
         // Проверяем наличие зашифрованного или обычного архива
+        // Поддерживаем оба варианта имени для обратной совместимости
         let encrypted_path = backup_path.join("data.tar.gz.enc");
+        let encrypted_path_wrong = backup_path.join("data.tar.tar.gz.enc"); // Для обратной совместимости
         let plain_path = backup_path.join("data.tar.gz");
         
-        if !encrypted_path.exists() && !plain_path.exists() {
+        if !encrypted_path.exists() && !encrypted_path_wrong.exists() && !plain_path.exists() {
             return Ok(false);
         }
 
@@ -486,13 +503,24 @@ impl BackupEngine {
             println!("  Files in manifest: {}", index.file_count);
             println!("  Encrypted: {}", index.encrypted.unwrap_or(false));
 
+            // Определяем, какой файл использовать
+            let (archive_path, is_encrypted) = if encrypted_path.exists() {
+                (&encrypted_path, true)
+            } else if encrypted_path_wrong.exists() {
+                (&encrypted_path_wrong, true)
+            } else if plain_path.exists() {
+                (&plain_path, false)
+            } else {
+                return Ok(false);
+            };
+
             // Если архив зашифрован и у нас есть ключ, проверяем дешифрование
-            if index.encrypted.unwrap_or(false) && self.crypto.is_enabled() {
+            if is_encrypted && self.crypto.is_enabled() {
                 println!("  Testing decryption...");
                 let temp_dir = tempdir()?;
                 let temp_file = temp_dir.path().join("test_decrypt.tar.gz");
                 
-                match self.crypto.decrypt_file(&encrypted_path, &temp_file) {
+                match self.crypto.decrypt_file(archive_path, &temp_file) {
                     Ok(_) => {
                         println!("  Decryption: OK");
                         // Проверяем архив после дешифрования
@@ -507,13 +535,16 @@ impl BackupEngine {
                         return Ok(false);
                     }
                 }
-            } else if plain_path.exists() {
+            } else if !is_encrypted {
                 // Проверяем обычный архив
-                let file = fs::File::open(&plain_path)?;
+                let file = fs::File::open(archive_path)?;
                 let mut archive = Archive::new(flate2::read::GzDecoder::new(file));
                 let file_count = archive.entries()?.count();
                 println!("  Files in archive: {}", file_count);
                 return Ok(true);
+            } else {
+                println!("  Skipping: Archive is encrypted but encryption is disabled");
+                return Ok(false);
             }
         }
 
@@ -539,11 +570,16 @@ impl BackupEngine {
         let backup_path = self.storage.backup_path(&backup_info.id);
         
         // Проверяем наличие зашифрованного или обычного архива
+        // Поддерживаем оба варианта имени для обратной совместимости
         let encrypted_path = backup_path.join("data.tar.gz.enc");
+        let encrypted_path_wrong = backup_path.join("data.tar.tar.gz.enc"); // Для обратной совместимости
         let plain_path = backup_path.join("data.tar.gz");
         
+        // Определяем, какой файл использовать
         let (archive_path, is_encrypted) = if encrypted_path.exists() {
             (&encrypted_path, true)
+        } else if encrypted_path_wrong.exists() {
+            (&encrypted_path_wrong, true)
         } else if plain_path.exists() {
             (&plain_path, false)
         } else {

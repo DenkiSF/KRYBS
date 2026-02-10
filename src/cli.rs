@@ -320,6 +320,25 @@ impl Cli {
                     crate::storage::bytes_to_human(result.size_bytes),
                     crate::storage::bytes_to_human(result.archive_size)
                 );
+                
+                // Исправленный расчет сжатия
+                if result.size_bytes > 0 {
+                    let ratio = result.archive_size as f64 / result.size_bytes as f64;
+                    if result.archive_size < result.size_bytes {
+                        let compression = (1.0 - ratio) * 100.0;
+                        println!("  Compression:  +{:.1}%", compression);
+                    } else if result.archive_size > result.size_bytes {
+                        let increase = (ratio - 1.0) * 100.0;
+                        if result.encrypted {
+                            println!("  Overhead:     {:.1}% (metadata + encryption)", increase);
+                        } else {
+                            println!("  Overhead:     {:.1}% (metadata)", increase);
+                        }
+                    } else {
+                        println!("  Compression:  0.0%");
+                    }
+                }
+                
                 println!("  Encryption: {}", if result.encrypted { "✓ (Kuznechik GOST R 34.12-2015)" } else { "✗" });
                 println!("  Duration: {:.1}s", result.duration_secs);
                 
@@ -618,7 +637,7 @@ impl Cli {
                     println!("Maximum age: {}", max_age);
                 }
                 if *dry_run {
-                    println!("DRY RUN - no backups will be deleted");
+                    println!("[DRY RUN] No changes will be made");
                 }
                 if let Some(profile_filter) = profile_filter {
                     println!("Profile filter: {}", profile_filter);
@@ -630,8 +649,154 @@ impl Cli {
                     println!("Force mode - no confirmation");
                 }
 
-                // TODO: Реализовать логику очистки
-                println!("Cleanup functionality not yet implemented");
+                // Загружаем конфигурацию
+                let config = crate::config::Config::load(self.config.as_deref()).unwrap_or_default();
+                let backup_dir = self
+                    .backup_dir
+                    .as_deref()
+                    .unwrap_or(&config.core.backup_dir);
+                
+                // Создаем хранилище
+                let storage = crate::storage::BackupStorage::new(&backup_dir.display().to_string());
+                
+                // Получаем список всех бэкапов
+                let mut backups = storage.list_all()?;
+                
+                // Сортируем по времени (новые сначала)
+                backups.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+                
+                println!("Found {} backups", backups.len());
+                
+                // Применяем фильтры
+                let mut to_keep = Vec::new();
+                let mut to_delete = Vec::new();
+                
+                // Фильтр по профилю
+                let filtered_backups: Vec<_> = if let Some(filter) = profile_filter {
+                    backups.into_iter()
+                        .filter(|b| &b.profile == filter)
+                        .collect()
+                } else {
+                    backups
+                };
+                
+                println!("After profile filter: {} backups", filtered_backups.len());
+                
+                // Keep last N
+                if let Some(keep_last) = keep_last {
+                    for (i, backup) in filtered_backups.iter().enumerate() {
+                        if i < *keep_last {
+                            to_keep.push(backup);
+                        } else {
+                            to_delete.push(backup);
+                        }
+                    }
+                } else {
+                    // Если не указано keep_last, оставляем все
+                    to_keep = filtered_backups.iter().collect();
+                }
+                
+                // Максимальный возраст (базовая реализация - по дням)
+                if let Some(max_age_str) = max_age {
+                    if max_age_str.ends_with('d') {
+                        if let Ok(days) = max_age_str.trim_end_matches('d').parse::<i64>() {
+                            let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
+                            for backup in filtered_backups.iter() {
+                                if backup.timestamp < cutoff {
+                                    if !to_delete.iter().any(|b| b.id == backup.id) {
+                                        to_delete.push(backup);
+                                    }
+                                } else {
+                                    if !to_keep.iter().any(|b| b.id == backup.id) {
+                                        to_keep.push(backup);
+                                    }
+                                }
+                            }
+                            println!("Max age filter: {} days (cutoff: {})", days, cutoff.format("%Y-%m-%d"));
+                        }
+                    } else {
+                        println!("Warning: max-age format not supported, use '7d', '30d', etc.");
+                    }
+                }
+                
+                // Удаление поврежденных бэкапов
+                if *remove_corrupted {
+                    println!("Checking for corrupted backups...");
+                    let engine = crate::backup::BackupEngine::new(storage.clone(), config.clone())?;
+                    
+                    for backup in &filtered_backups {
+                        let is_ok = tokio::runtime::Runtime::new()?.block_on(
+                            engine.verify_backup(&backup.id)
+                        )?;
+                        
+                        if !is_ok {
+                            println!("  Backup {} is corrupted", backup.id);
+                            if !to_delete.iter().any(|b| b.id == backup.id) {
+                                to_delete.push(backup);
+                            }
+                        }
+                    }
+                }
+                
+                // Убираем дубликаты (если бэкап попал и в to_keep и в to_delete)
+                to_delete.retain(|backup| {
+                    !to_keep.iter().any(|b| b.id == backup.id)
+                });
+                
+                println!("\nSummary:");
+                println!("  To keep: {} backups", to_keep.len());
+                println!("  To delete: {} backups", to_delete.len());
+                
+                if !to_delete.is_empty() {
+                    if *dry_run {
+                        println!("\n[DRY RUN] Would delete:");
+                        for backup in &to_delete {
+                            println!("  - {} (profile: {}, date: {})", 
+                                backup.id, 
+                                backup.profile,
+                                backup.timestamp.format("%Y-%m-%d")
+                            );
+                        }
+                        println!("\nTotal space to free: {}",
+                            crate::storage::bytes_to_human(
+                                to_delete.iter().map(|b| b.size_encrypted).sum()
+                            )
+                        );
+                    } else if *force {
+                        println!("\nDeleting backups (force mode)...");
+                        let mut freed_space = 0;
+                        for backup in &to_delete {
+                            let backup_path = storage.backup_path(&backup.id);
+                            if backup_path.exists() {
+                                println!("  Deleting: {} (profile: {})", backup.id, backup.profile);
+                                freed_space += backup.size_encrypted;
+                                std::fs::remove_dir_all(&backup_path)?;
+                            }
+                        }
+                        println!("\n[SUCCESS] Cleanup completed");
+                        println!("  Freed space: {}", crate::storage::bytes_to_human(freed_space));
+                        println!("  Remaining backups: {}", to_keep.len());
+                    } else {
+                        println!("\nBackups marked for deletion (use --force to actually delete):");
+                        for backup in &to_delete {
+                            println!("  - {} (profile: {}, date: {}, size: {})", 
+                                backup.id, 
+                                backup.profile,
+                                backup.timestamp.format("%Y-%m-%d"),
+                                crate::storage::bytes_to_human(backup.size_encrypted)
+                            );
+                        }
+                        println!("\nTotal space to free: {}",
+                            crate::storage::bytes_to_human(
+                                to_delete.iter().map(|b| b.size_encrypted).sum()
+                            )
+                        );
+                        println!("\nRun with --force to delete these backups");
+                    }
+                } else {
+                    println!("\nNo backups to delete.");
+                }
+                
                 Ok(())
             }
 
