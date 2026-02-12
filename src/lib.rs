@@ -3,7 +3,6 @@ pub mod backup;
 pub mod cli;
 pub mod config;
 pub mod crypto;  // Модуль оставлен, но содержит заглушки
-pub mod kuznechik;
 pub mod storage;
 
 use anyhow::Result;

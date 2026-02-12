@@ -29,7 +29,7 @@ pub struct BackupInfo {
     pub file_count: u64,
     pub size_encrypted: u64, // в байтах
     pub checksum: Option<String>, // SHA256 зашифрованного архива
-    pub encrypted: Option<bool>, // Добавляем это поле
+    pub encrypted: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,8 +39,9 @@ pub struct LocalIndex {
     pub timestamp: DateTime<Utc>,
     pub profile: String,
     pub file_count: u64,
-    pub size_encrypted: String, // Человекочитаемый формат
-    pub encrypted: Option<bool>, // Добавляем это поле
+    pub size_encrypted: String, // человекочитаемый формат
+    pub encrypted: Option<bool>,
+    pub checksum: Option<String>, // SHA256 зашифрованного архива
 }
 
 impl From<&BackupInfo> for LocalIndex {
@@ -53,6 +54,7 @@ impl From<&BackupInfo> for LocalIndex {
             file_count: info.file_count,
             size_encrypted: bytes_to_human(info.size_encrypted),
             encrypted: info.encrypted,
+            checksum: info.checksum.clone(),
         }
     }
 }
@@ -94,7 +96,6 @@ impl BackupStorage {
     pub fn init(&self) -> Result<()> {
         fs::create_dir_all(&self.backup_dir)
             .context("Failed to create backup directory")?;
-
         Ok(())
     }
 
@@ -103,6 +104,20 @@ impl BackupStorage {
         self.backup_dir.join(id)
     }
 
+    /// Возвращает время последнего бэкапа для указанного профиля
+    pub fn last_backup_time_for_profile(&self, profile: &str) -> Result<Option<DateTime<Utc>>> {
+        let backups = self.list_all()?;
+        
+        // Фильтруем бэкапы по профилю и находим самый свежий
+        let last = backups
+            .into_iter()
+            .filter(|b| b.profile == profile)
+            .max_by_key(|b| b.timestamp)
+            .map(|b| b.timestamp);
+        
+        Ok(last)
+    }
+    
     /// Читает локальный индекс бэкапа
     pub fn read_local_index(&self, id: &str) -> Result<LocalIndex> {
         let backup_path = self.backup_path(id);
@@ -121,14 +136,14 @@ impl BackupStorage {
     pub fn write_local_index(&self, info: &BackupInfo) -> Result<()> {
         let backup_path = self.backup_path(&info.id);
 
-        // Создаем директорию бэкапа если её нет
         fs::create_dir_all(&backup_path)
             .with_context(|| format!("Failed to create backup directory for {}", info.id))?;
 
         let index = LocalIndex::from(info);
         let index_path = backup_path.join("index-local.json");
 
-        let content = serde_json::to_string_pretty(&index).context("Failed to serialize index")?;
+        let content = serde_json::to_string_pretty(&index)
+            .context("Failed to serialize index")?;
 
         fs::write(&index_path, content)
             .with_context(|| format!("Failed to write index to {}", index_path.display()))?;
@@ -141,18 +156,13 @@ impl BackupStorage {
         self.list_backups_in_dir(&self.backup_dir)
     }
 
-    /// Возвращает все бэкапы
+    /// Возвращает все бэкапы (для совместимости – каждый бэкап отдельная цепочка)
     pub fn list_all_chained(&self) -> Result<HashMap<String, Vec<BackupInfo>>> {
         let mut chains = HashMap::new();
-
-        // Находим все бэкапы
         let backups = self.list_all()?;
-
         for backup in backups {
-            // Каждый бэкап - отдельная цепочка
             chains.insert(backup.id.clone(), vec![backup.clone()]);
         }
-
         Ok(chains)
     }
 
@@ -162,11 +172,11 @@ impl BackupStorage {
         Ok(vec![backup])
     }
 
-    /// Читает полную информацию о бэкапе из индекса (публичный метод)
+    /// Читает полную информацию о бэкапе из индекса
     pub fn read_backup_info(&self, id: &str) -> Result<BackupInfo> {
         let local_index = self.read_local_index(id)?;
 
-        // Конвертируем human-readable размер обратно в байты
+        // Конвертируем человекочитаемый размер обратно в байты
         let size_bytes = human_to_bytes(&local_index.size_encrypted).unwrap_or(0);
 
         Ok(BackupInfo {
@@ -176,7 +186,7 @@ impl BackupStorage {
             profile: local_index.profile,
             file_count: local_index.file_count,
             size_encrypted: size_bytes,
-            checksum: None, // Для полной информации нужен манифест
+            checksum: local_index.checksum.clone(), // ✅ теперь контрольная сумма сохраняется
             encrypted: local_index.encrypted,
         })
     }
@@ -200,7 +210,6 @@ impl BackupStorage {
                     .map(|s| s.to_string())
                     .unwrap_or_default();
 
-                // Читаем информацию о бэкапе
                 match self.read_backup_info(&backup_id) {
                     Ok(info) => backups.push(info),
                     Err(e) => {
@@ -210,9 +219,7 @@ impl BackupStorage {
             }
         }
 
-        // Сортируем по времени (новые сначала)
         backups.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-
         Ok(backups)
     }
 
@@ -224,16 +231,14 @@ impl BackupStorage {
         }
     }
 
-    /// Проверяет целостность бэкапа
+    /// Проверяет целостность бэкапа (базовая проверка наличия файлов)
     pub fn verify_backup(&self, id: &str) -> Result<bool> {
         let backup_path = self.backup_path(id);
 
-        // Проверяем существование директории
         if !backup_path.exists() {
             return Ok(false);
         }
 
-        // Проверяем наличие обязательных файлов
         let required_files = ["index-local.json", "data.tar.gz", "manifest.json"];
         for file in required_files {
             if !backup_path.join(file).exists() {
@@ -241,7 +246,6 @@ impl BackupStorage {
             }
         }
 
-        // Проверяем валидность индекса
         match self.read_local_index(id) {
             Ok(_) => Ok(true),
             Err(_) => Ok(false),
@@ -256,7 +260,6 @@ impl BackupStorage {
             profiles: HashMap::new(),
         };
 
-        // Считаем бэкапы
         if let Ok(backups) = self.list_all() {
             stats.total_backups = backups.len();
             for backup in backups {
@@ -318,6 +321,5 @@ fn human_to_bytes(human: &str) -> Option<u64> {
         }
     }
 
-    // Если не нашли единицы измерения, пробуем просто число
     human.parse::<u64>().ok()
 }

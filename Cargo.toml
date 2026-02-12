@@ -26,9 +26,13 @@ dirs = "5.0"
 streebog = "0.10.2"
 once_cell = "1.19"
 tempfile = "3.10"
-
+libgost-rs = { git = "https://github.com/glukozka-dev/libgost-rs.git" }
+filetime = "0.2"
 
 [dev-dependencies]
 assert_cmd = "2.0"
 assert_fs = "1.0"
 predicates = "3.0"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["user", "fs"] }
