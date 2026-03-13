@@ -1,9 +1,18 @@
 // src/cli.rs
+
 use anyhow::{anyhow, Result};
 use chrono::Duration;
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::{Path, PathBuf};
+use serde::Serialize;
+use serde_json::{json, Value};
+use crate::backup::BackupResult;
+use crate::storage::BackupInfo;
+
+use log::{info, warn, error}; // для логирования
+
+use crate::source::BackupSource;
 
 #[derive(Parser)]
 #[command(
@@ -37,7 +46,7 @@ pub struct Cli {
     pub command: Commands,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum Commands {
     /// Create backup of specified paths or profile
     ///
@@ -100,6 +109,10 @@ pub enum Commands {
         /// Show progress bar during extraction
         #[arg(long)]
         progress: bool,
+
+        /// Skip integrity check before restore
+        #[arg(long)]
+        skip_verify: bool,
     },
 
     /// List available backups
@@ -252,6 +265,106 @@ pub enum Commands {
         #[arg(long)]
         set_backup_dir: Option<PathBuf>,
     },
+    /// Backup PostgreSQL database
+    ///
+    /// Example: krybs backup-postgres --dbname mydb --user postgres
+    #[command(name = "backup-postgres")]
+    BackupPostgres {
+        /// Database name
+        #[arg(short, long)]
+        dbname: String,
+
+        /// PostgreSQL host (default: localhost)
+        #[arg(long, default_value = "localhost")]
+        host: String,
+
+        /// PostgreSQL port (default: 5432)
+        #[arg(long, default_value = "5432")]
+        port: u16,
+
+        /// PostgreSQL user
+        #[arg(short, long)]
+        user: String,
+
+        /// Password (if not provided, will try to use .pgpass or environment)
+        #[arg(short, long)]
+        password: Option<String>,
+
+        /// Backup directory (overrides config)
+        #[arg(long)]
+        backup_dir: Option<PathBuf>,
+
+        /// Profile name for metadata
+        #[arg(long)]
+        profile: Option<String>,
+
+        /// Skip verification after backup
+        #[arg(long)]
+        no_verify: bool,
+    },
+
+    #[command(name = "backup-s3")]
+    BackupS3 {
+        sources: Vec<PathBuf>,
+        #[arg(short, long)]
+        exclude: Vec<String>,
+        #[arg(long)]
+        bucket: String,
+        #[arg(long, default_value = "us-east-1")]
+        region: String,
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[arg(long, default_value = "")]
+        prefix: String,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        no_verify: bool,
+    },
+}
+
+#[derive(Serialize)]
+struct BackupResponse {
+    status: String,
+    backup: BackupResult,
+    compression_ratio: f64,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct ListResponse {
+    status: String,
+    backups: Vec<BackupInfo>,
+    count: usize,
+}
+
+#[derive(Serialize)]
+struct StatusResponse {
+    status: String,
+    config: serde_json::Value,
+    storage: StorageStatsResponse,
+    integrity: Option<IntegrityInfo>,
+    recent_backups: Option<Vec<BackupInfo>>,
+}
+
+#[derive(Serialize)]
+struct StorageStatsResponse {
+    total_backups: usize,
+    total_size: u64,
+    total_size_human: String,
+    profiles: Vec<ProfileCount>,
+}
+
+#[derive(Serialize)]
+struct ProfileCount {
+    name: String,
+    count: usize,
+}
+
+#[derive(Serialize)]
+struct IntegrityInfo {
+    ok: usize,
+    corrupted: usize,
 }
 
 impl Cli {
@@ -274,7 +387,8 @@ impl Cli {
                 path,
                 force,
                 progress,
-            } => self.cmd_restore(backup_id, destination, *verify, path.as_deref(), *force, *progress),
+                skip_verify,
+            } => self.cmd_restore(backup_id, destination, *verify, path.as_deref(), *force, *progress, *skip_verify),
 
             Commands::List {
                 details,
@@ -328,9 +442,150 @@ impl Cli {
                 examples,
                 set_backup_dir,
             } => self.cmd_init_config(*interactive, output.as_deref(), *defaults, *examples, set_backup_dir.as_deref()),
+            Commands::BackupPostgres {
+                dbname,
+                host,
+                port,
+                user,
+                password,
+                backup_dir,
+                profile,
+                no_verify,
+            } => self.cmd_backup_postgres(
+                dbname,
+                host,
+                *port,
+                user,
+                password.as_deref(),
+                backup_dir.as_deref(),
+                profile.as_deref(),
+                *no_verify,
+            ),
+            Commands::BackupS3 {
+                sources,
+                exclude,
+                bucket,
+                region,
+                endpoint,
+                prefix,
+                profile,
+                no_verify,
+            } => self.cmd_backup_s3(
+                sources,
+                exclude,
+                bucket,
+                region,
+                endpoint.as_deref(),
+                prefix,
+                profile.as_deref(),
+                *no_verify,
+            ),
+        }
+    }
+    fn cmd_backup_s3(
+        &self,
+        sources: &[PathBuf],
+        exclude: &[String],
+        bucket: &str,
+        region: &str,
+        endpoint: Option<&str>,
+        prefix: &str,
+        profile_name: Option<&str>,
+        no_verify: bool,
+    ) -> Result<()> {
+        info!("KRYBS {} command 'backup-s3' called", crate::VERSION);
+
+        let config = crate::config::Config::load(self.config.as_deref()).unwrap_or_default();
+
+        // Создаём временную директорию
+        let temp_dir = tempfile::tempdir()?;
+        let temp_backup_dir = temp_dir.path().join("backup");
+        std::fs::create_dir_all(&temp_backup_dir)?;
+
+        // Создаём временное хранилище (просто папка, не через BackupStorage, так как BackupStorage требует init и т.д.)
+        // Можно использовать обычный BackupStorage с путём temp_backup_dir
+        let storage = crate::storage::BackupStorage::new(temp_backup_dir.to_str().unwrap());
+        storage.init()?;
+
+        let engine = crate::backup::BackupEngine::new(storage, config)?;
+
+        let source = crate::source::file::FileSource::new(sources.to_vec(), exclude.to_vec())?;
+        let sources: Vec<Box<dyn crate::source::BackupSource>> = vec![Box::new(source)];
+
+        let result = tokio::runtime::Runtime::new()?.block_on(
+            engine.create_backup_from_sources(sources, profile_name, self.verbose)
+        )?;
+
+        let backup_path = temp_backup_dir.join(&result.id);
+
+        println!("Connecting to S3...");
+        let uploader = tokio::runtime::Runtime::new()?.block_on(
+            crate::storage::s3_uploader::S3Uploader::new(bucket, region, endpoint)
+        )?;
+
+        println!("Uploading backup to s3://{}/{}{}", bucket, prefix, result.id);
+        uploader.upload_backup(&result.id, &backup_path, prefix)?;
+
+        if self.json {
+            let response = serde_json::json!({
+                "status": "success",
+                "backup_id": result.id,
+                "profile": result.profile,
+                "files": result.file_count,
+                "size": result.archive_size,
+                "size_human": crate::utils::bytes_to_human(result.archive_size),
+                "s3_location": format!("s3://{}/{}{}/", bucket, prefix, result.id),
+            });
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        } else {
+            println!("\n[SUCCESS] Backup uploaded to S3 successfully!");
+            println!("  Backup ID: {}", result.id);
+            println!("  Profile: {}", result.profile);
+            println!("  Files: {}", result.file_count);
+            println!("  Size: {}", crate::utils::bytes_to_human(result.archive_size));
+            println!("  S3 location: s3://{}/{}{}/", bucket, prefix, result.id);
+        }
+
+        Ok(())
+    }
+    
+    fn print_json<T: Serialize>(&self, value: &T) -> Result<()> {
+        if self.json {
+            println!("{}", serde_json::to_string_pretty(value)?);
+        }
+        Ok(())
+    }
+
+    fn print_text(&self, text: &str) {
+        if !self.json {
+            println!("{}", text);
         }
     }
 
+    fn check_storage_integrity_summary(
+        &self,
+        storage: &crate::storage::BackupStorage,
+        config: &crate::config::Config,
+    ) -> Result<(usize, usize)> {
+        let backups = storage.list_all()?;
+        let engine = crate::backup::BackupEngine::new(storage.clone(), config.clone())?;
+
+        let mut ok = 0;
+        let mut corrupted = 0;
+
+        for backup in backups {
+            let result = tokio::runtime::Runtime::new()?.block_on(
+                engine.verify_backup(&backup.id, true, false) // quick=true
+            )?;
+            if result.is_ok() {
+                ok += 1;
+            } else {
+                corrupted += 1;
+            }
+        }
+
+        Ok((ok, corrupted))
+    }
     // ------------------------------------------------------------------------
     // Command implementations
     // ------------------------------------------------------------------------
@@ -343,7 +598,7 @@ impl Cli {
         min_interval: &Option<String>,
         force: bool,
     ) -> Result<()> {
-        println!("KRYBS {} command 'backup' called", crate::VERSION);
+        info!("KRYBS {} command 'backup' called", crate::VERSION);
 
         // Load configuration (or defaults)
         let config = crate::config::Config::load(self.config.as_deref()).unwrap_or_default();
@@ -358,26 +613,26 @@ impl Cli {
         let storage = crate::storage::BackupStorage::new(&backup_dir.display().to_string());
         if !backup_dir.exists() {
             storage.init()?;
-            println!("Created backup directory: {}", backup_dir.display());
+            info!("Created backup directory: {}", backup_dir.display());
         }
 
         // Create backup engine
         let engine = crate::backup::BackupEngine::new(storage, config)?;
-        println!("[INFO] Encryption: {}", engine.encryption_status());
+        info!("Encryption: {}", engine.encryption_status());
 
         // Determine paths to back up
         let paths_to_backup = if let Some(profile_name) = &self.profile {
             // Profile specified: load config again to get paths
             let config = crate::config::Config::load(self.config.as_deref())?;
             if let Some(profile) = config.find_profile(profile_name) {
-                println!(
+                info!(
                     "Using profile '{}' with {} path(s)",
                     profile.name,
                     profile.paths.len()
                 );
                 profile.paths.clone()
             } else {
-                eprintln!("Profile '{}' not found in config", profile_name);
+                warn!("Profile '{}' not found in config", profile_name);
                 sources.to_vec()
             }
         } else {
@@ -400,20 +655,30 @@ impl Cli {
                     let hours = time_left.num_hours();
                     let minutes = time_left.num_minutes() % 60;
 
-                    println!(
-                        "⚠️  Last backup for profile '{}' is too recent.",
-                        profile_name
-                    );
-                    println!(
-                        "   Next backup allowed in {}h {}m (minimum interval: {})",
-                        hours, minutes, interval_str
+                    let msg = format!(
+                        "Last backup for profile '{}' is too recent. Next backup allowed in {}h {}m (minimum interval: {})",
+                        profile_name, hours, minutes, interval_str
                     );
 
                     if !force {
-                        println!("   Use --force to override or wait.");
+                        if self.json {
+                            let err_json = json!({
+                                "status": "error",
+                                "error": "interval_check_failed",
+                                "message": msg,
+                                "time_left_hours": hours as f64 + minutes as f64 / 60.0,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&err_json)?);
+                        } else {
+                            println!("⚠️  {}", msg);
+                            println!("   Use --force to override or wait.");
+                        }
                         return Ok(());
                     } else {
-                        println!("   --force detected, proceeding anyway.");
+                        if !self.json {
+                            println!("   --force detected, proceeding anyway.");
+                        }
+                        info!("Backup forced despite interval check.");
                     }
                 }
                 None => {
@@ -422,38 +687,68 @@ impl Cli {
             }
         }
 
-        // Perform the backup
-        let result = tokio::runtime::Runtime::new()?.block_on(engine.create_backup(
-            paths_to_backup,
-            exclude.to_vec(),
+        // Create source and perform backup
+        let source = match crate::source::file::FileSource::new(paths_to_backup, exclude.to_vec()) {
+            Ok(src) => src,
+            Err(e) => {
+                error!("Failed to create file source: {}", e);
+                return Err(e);
+            }
+        };
+        let sources: Vec<Box<dyn crate::source::BackupSource>> = vec![Box::new(source)];
+
+        let result = tokio::runtime::Runtime::new()?.block_on(engine.create_backup_from_sources(
+            sources,
             self.profile.as_deref(),
             self.verbose,
         ))?;
 
+        // Compute compression ratio
+        let ratio = if result.size_bytes > 0 {
+            result.archive_size as f64 / result.size_bytes as f64
+        } else {
+            0.0
+        };
+
+        // JSON output
+        if self.json {
+            #[derive(Serialize)]
+            struct BackupResponse {
+                status: String,
+                backup: crate::backup::BackupResult,
+                compression_ratio: f64,
+                message: String,
+            }
+            let response = BackupResponse {
+                status: "success".to_string(),
+                backup: result.clone(),
+                compression_ratio: ratio,
+                message: "Backup created successfully".to_string(),
+            };
+            println!("{}", serde_json::to_string_pretty(&response)?);
+            return Ok(());
+        }
+
+        // Human-readable output
         println!("\n[SUCCESS] Backup created successfully!");
         println!("  Backup ID: {}", result.id);
         println!("  Profile: {}", result.profile);
         println!("  Files: {}", result.file_count);
         println!(
             "  Size: {} → {}",
-            crate::storage::bytes_to_human(result.size_bytes),
-            crate::storage::bytes_to_human(result.archive_size)
+            crate::utils::bytes_to_human(result.size_bytes),
+            crate::utils::bytes_to_human(result.archive_size)
         );
 
         if result.size_bytes > 0 {
-            let ratio = result.archive_size as f64 / result.size_bytes as f64;
             if result.archive_size < result.size_bytes {
-                let compression = (1.0 - ratio) * 100.0;
-                println!("  Compression:  +{:.1}%", compression);
+                let saved = (1.0 - ratio) * 100.0;
+                println!("  Compression saved: {:.1}%", saved);
             } else if result.archive_size > result.size_bytes {
-                let increase = (ratio - 1.0) * 100.0;
-                if result.encrypted {
-                    println!("  Overhead:     {:.1}% (metadata + encryption)", increase);
-                } else {
-                    println!("  Overhead:     {:.1}% (metadata)", increase);
-                }
+                let overhead = (ratio - 1.0) * 100.0;
+                println!("  Storage overhead: {:.1}%", overhead);
             } else {
-                println!("  Compression:  0.0%");
+                println!("  Compression ratio: 1.0");
             }
         }
 
@@ -467,19 +762,98 @@ impl Cli {
         );
         println!("  Duration: {:.1}s", result.duration_secs);
 
-        // Show backup location
         let storage = self.storage()?;
         println!("  Location: {}", storage.backup_path(&result.id).display());
 
         // Optional verification after backup (unless disabled)
         if !no_verify {
             println!("\n[INFO] Running quick verification of created backup...");
+            info!("Verifying backup {} after creation", result.id);
             let verify_result = tokio::runtime::Runtime::new()?.block_on(
                 engine.verify_backup(&result.id, true, false), // quick=true, progress=false
             )?;
             if verify_result.is_ok() {
                 println!("[OK] Backup verified successfully.");
+                info!("Backup {} verified successfully", result.id);
             } else {
+                warn!("Backup verification reported issues.");
+                eprintln!("[WARN] Backup verification reported issues.");
+            }
+        }
+
+        Ok(())
+    }
+
+    fn cmd_backup_postgres(
+        &self,
+        dbname: &str,
+        host: &str,
+        port: u16,
+        user: &str,
+        password: Option<&str>,
+        backup_dir: Option<&Path>,
+        profile_name: Option<&str>,
+        no_verify: bool,
+    ) -> Result<()> {
+        info!("KRYBS {} command 'backup-postgres' called", crate::VERSION);
+
+        // Load configuration (or defaults)
+        let config = crate::config::Config::load(self.config.as_deref()).unwrap_or_default();
+
+        // Determine backup directory (CLI overrides config)
+        let backup_dir = backup_dir
+            .or(self.backup_dir.as_deref())
+            .unwrap_or(&config.core.backup_dir);
+
+        // Create storage and ensure it exists
+        let storage = crate::storage::BackupStorage::new(&backup_dir.display().to_string());
+        if !backup_dir.exists() {
+            storage.init()?;
+            info!("Created backup directory: {}", backup_dir.display());
+        }
+
+        // Create backup engine
+        let engine = crate::backup::BackupEngine::new(storage, config)?;
+        info!("Encryption: {}", engine.encryption_status());
+
+        // Create Postgres source
+        let source = crate::source::postgres::PostgresSource::new(
+            dbname.to_string(),
+            host.to_string(),
+            port,
+            user.to_string(),
+            password.map(|s| s.to_string()),
+        );
+        let sources: Vec<Box<dyn BackupSource>> = vec![Box::new(source)];
+
+        // Perform backup
+        let result = tokio::runtime::Runtime::new()?.block_on(engine.create_backup_from_sources(
+            sources,
+            profile_name,
+            self.verbose,
+        ))?;
+
+        println!("\n[SUCCESS] PostgreSQL backup created successfully!");
+        println!("  Backup ID: {}", result.id);
+        println!("  Database: {}", dbname);
+        println!("  Profile: {}", result.profile);
+        println!(
+            "  Size: {}",
+            crate::utils::bytes_to_human(result.archive_size)
+        );
+
+        // Optional verification
+        if !no_verify {
+            println!("\n[INFO] Running quick verification of created backup...");
+            info!("Verifying backup {} after creation", result.id);
+            let verify_result = tokio::runtime::Runtime::new()?.block_on(
+                engine.verify_backup(&result.id, true, false)
+            )?;
+            if verify_result.is_ok() {
+                println!("[OK] Backup verified successfully.");
+                info!("Backup {} verified successfully", result.id);
+            } else {
+                warn!("Backup verification reported issues.");
                 eprintln!("[WARN] Backup verification reported issues.");
             }
         }
@@ -491,12 +865,13 @@ impl Cli {
         &self,
         backup_id: &str,
         destination: &PathBuf,
-        _verify: bool,
+        verify: bool,
         path: Option<&Path>,
         force: bool,
         progress: bool,
+        skip_verify: bool,
     ) -> Result<()> {
-        println!("KRYBS {} command 'restore' called", crate::VERSION);
+        info!("KRYBS {} command 'restore' called", crate::VERSION);
         println!(
             "Restoring backup '{}' to '{}'",
             backup_id,
@@ -512,8 +887,34 @@ impl Cli {
         let storage = crate::storage::BackupStorage::new(&backup_dir.display().to_string());
         let engine = crate::backup::BackupEngine::new(storage, config)?;
 
-        println!("[INFO] Encryption: {}", engine.encryption_status());
+        info!("Encryption: {}", engine.encryption_status());
 
+        // --- Integrity check before restore ---
+        if !skip_verify {
+            println!("[INFO] Running quick integrity check before restore...");
+            info!("Verifying backup {} before restore", backup_id);
+
+            let verify_result = tokio::runtime::Runtime::new()?.block_on(
+                engine.verify_backup(backup_id, true, false) // quick=true, progress=false
+            )?;
+
+            if !verify_result.is_ok() {
+                error!("Backup integrity check failed for {}", backup_id);
+                eprintln!("[ERROR] Backup integrity check failed. Aborting restore.");
+                for err in &verify_result.errors {
+                    eprintln!("  - {}", err);
+                }
+                return Err(anyhow::anyhow!("Backup verification failed"));
+            }
+
+            println!("[OK] Integrity check passed.");
+            info!("Backup {} verified successfully", backup_id);
+        } else {
+            println!("[INFO] Skipping integrity check as requested.");
+            warn!("Backup integrity check skipped by user for {}", backup_id);
+        }
+
+        // Perform restore
         tokio::runtime::Runtime::new()?.block_on(engine.restore_backup(
             backup_id,
             destination,
@@ -522,8 +923,45 @@ impl Cli {
             progress,
         ))?;
 
-        // Verification after restore is not yet implemented (--verify flag ignored)
         println!("[SUCCESS] Restore completed to {}", destination.display());
+        info!("Restore completed for backup {}", backup_id);
+
+        // --- Optional verification after restore ---
+        if verify {
+            println!("\n[INFO] Verifying restored files against manifest...");
+            match engine.verify_restored(backup_id, destination) {
+                Ok(verify_result) => {
+                    if verify_result.is_ok() {
+                        println!("[OK] All files verified successfully ({} files matched)", verify_result.files_matched);
+                    } else {
+                        println!("[WARN] Verification found issues:");
+                        if !verify_result.files_missing.is_empty() {
+                            println!("  Missing files: {}", verify_result.files_missing.len());
+                            for f in verify_result.files_missing.iter().take(5) {
+                                println!("    - {}", f);
+                            }
+                            if verify_result.files_missing.len() > 5 {
+                                println!("    ... and {} more", verify_result.files_missing.len() - 5);
+                            }
+                        }
+                        if !verify_result.files_corrupted.is_empty() {
+                            println!("  Corrupted files: {}", verify_result.files_corrupted.len());
+                            for f in verify_result.files_corrupted.iter().take(5) {
+                                println!("    - {}", f);
+                            }
+                            if verify_result.files_corrupted.len() > 5 {
+                                println!("    ... and {} more", verify_result.files_corrupted.len() - 5);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[ERROR] Failed to verify restored files: {}", e);
+                    error!("Failed to verify restored files: {}", e);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -532,9 +970,9 @@ impl Cli {
         details: bool,
         limit: Option<usize>,
         profile_filter: Option<&str>,
-        _sort: &str,
+        sort: &str,
     ) -> Result<()> {
-        println!("KRYBS {} command 'list' called", crate::VERSION);
+        info!("KRYBS {} command 'list' called", crate::VERSION);
 
         let config = crate::config::Config::load(self.config.as_deref()).unwrap_or_default();
         let backup_dir = self
@@ -542,39 +980,91 @@ impl Cli {
             .as_deref()
             .unwrap_or(&config.core.backup_dir);
 
-        println!("Using backup directory: {}", backup_dir.display());
-
         let storage = crate::storage::BackupStorage::new(&backup_dir.display().to_string());
 
         if !backup_dir.exists() {
-            println!("Backup directory does not exist: {}", backup_dir.display());
+            if self.json {
+                let empty = json!({
+                    "status": "success",
+                    "backups": [],
+                    "count": 0,
+                    "message": "Backup directory does not exist"
+                });
+                println!("{}", serde_json::to_string_pretty(&empty)?);
+            } else {
+                println!("Backup directory does not exist: {}", backup_dir.display());
+            }
             return Ok(());
         }
 
-        match storage.list_all() {
-            Ok(backups) => {
-                println!("Backups ({}):", backups.len());
+        let backups = match storage.list_all() {
+            Ok(b) => b,
+            Err(e) => {
+                error!("Error listing backups: {}", e);
+                if self.json {
+                    let err = json!({
+                        "status": "error",
+                        "error": "list_failed",
+                        "message": e.to_string()
+                    });
+                    println!("{}", serde_json::to_string_pretty(&err)?);
+                } else {
+                    println!("Error listing backups: {}", e);
+                }
+                return Ok(());
+            }
+        };
 
-                let mut sorted_backups = backups;
-                sorted_backups.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        // Sort (desc by default)
+        let mut sorted_backups = backups;
+        if sort == "asc" {
+            sorted_backups.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        } else {
+            sorted_backups.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        }
 
-                for (i, backup) in sorted_backups.iter().enumerate() {
-                    if let Some(limit) = limit {
-                        if i >= limit {
-                            break;
-                        }
-                    }
-
-                    if let Some(filter) = profile_filter {
-                        if backup.profile != filter {
-                            continue;
-                        }
-                    }
-
-                    self.display_backup(backup, details);
+        // Apply filters and limit
+        let mut filtered = Vec::new();
+        for backup in sorted_backups {
+            if let Some(filter) = profile_filter {
+                if backup.profile != filter {
+                    continue;
                 }
             }
-            Err(e) => println!("Error listing backups: {}", e),
+            filtered.push(backup);
+            if let Some(limit) = limit {
+                if filtered.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        // JSON output
+        if self.json {
+            #[derive(Serialize)]
+            struct ListResponse {
+                status: String,
+                backups: Vec<crate::storage::BackupInfo>,
+                count: usize,
+            }
+            let response = ListResponse {
+                status: "success".to_string(),
+                backups: filtered.clone(),
+                count: filtered.len(),
+            };
+            println!("{}", serde_json::to_string_pretty(&response)?);
+            return Ok(());
+        }
+
+        // Human-readable output
+        if filtered.is_empty() {
+            println!("No backups found.");
+            return Ok(());
+        }
+
+        println!("Backups ({}):", filtered.len());
+        for backup in filtered {
+            self.display_backup(&backup, details);
         }
 
         Ok(())
@@ -587,70 +1077,198 @@ impl Cli {
         history: bool,
         summary: bool,
     ) -> Result<()> {
-        println!("KRYBS {} command 'status' called", crate::VERSION);
+        info!("KRYBS {} command 'status' called", crate::VERSION);
 
-        match crate::config::Config::load(self.config.as_deref()) {
-            Ok(config) => {
-                if !summary {
-                    println!("Configuration:");
-                    println!("  Backup directory: {}", config.core.backup_dir.display());
-
-                    let key_exists = config.crypto.master_key_path.exists();
-                    println!(
-                        "  Encryption: {}",
-                        if key_exists {
-                            format!(
-                                "✓ (Kuznechik GOST R 34.12-2015)\n  Key: {}",
-                                config.crypto.master_key_path.display()
-                            )
-                        } else {
-                            "✗".to_string()
-                        }
-                    );
-                    println!("  Profiles configured: {}", config.profiles.len());
+        let config = match crate::config::Config::load(self.config.as_deref()) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Could not load configuration: {}", e);
+                if self.json {
+                    let err = json!({
+                        "status": "error",
+                        "error": "config_load_failed",
+                        "message": e.to_string()
+                    });
+                    println!("{}", serde_json::to_string_pretty(&err)?);
+                } else {
+                    println!("Warning: Could not load configuration: {}", e);
                 }
+                // Continue with default config for storage stats
+                crate::config::Config::default()
+            }
+        };
 
-                let storage = crate::storage::BackupStorage::new(
-                    &config.core.backup_dir.display().to_string(),
-                );
+        let backup_dir = self
+            .backup_dir
+            .as_deref()
+            .unwrap_or(&config.core.backup_dir);
+        let storage = crate::storage::BackupStorage::new(&backup_dir.display().to_string());
 
-                if show_storage || !summary {
-                    match storage.get_storage_stats() {
-                        Ok(stats) => {
-                            println!("\nStorage status:");
-                            print!("{}", stats.display());
-
-                            if check_integrity && !summary {
-                                println!("\nChecking backup integrity...");
-                                self.check_storage_integrity(&storage, &config)?;
-                            }
-                        }
-                        Err(e) => println!("Could not get storage stats: {}", e),
-                    }
+        // Gather storage stats
+        let stats = match storage.get_storage_stats() {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Could not get storage stats: {}", e);
+                if self.json {
+                    let err = json!({
+                        "status": "error",
+                        "error": "storage_stats_failed",
+                        "message": e.to_string()
+                    });
+                    println!("{}", serde_json::to_string_pretty(&err)?);
+                } else {
+                    println!("Could not get storage stats: {}", e);
                 }
+                return Ok(());
+            }
+        };
 
-                if history && !summary {
-                    println!("\nRecent backup history:");
-                    self.show_recent_history(&config)?;
+        // Integrity check summary (if requested)
+        let integrity_summary = if check_integrity {
+            let (ok, corrupted) = self.check_storage_integrity_summary(&storage, &config)?;
+            Some((ok, corrupted))
+        } else {
+            None
+        };
+
+        // JSON output
+        if self.json {
+            #[derive(Serialize)]
+            struct StatusResponse {
+                status: String,
+                config: serde_json::Value,
+                storage: StorageStatsJson,
+                integrity: Option<IntegrityJson>,
+                recent_backups: Option<Vec<crate::storage::BackupInfo>>,
+            }
+
+            #[derive(Serialize)]
+            struct StorageStatsJson {
+                total_backups: usize,
+                total_size: u64,
+                total_size_human: String,
+                profiles: Vec<ProfileCount>,
+            }
+
+            #[derive(Serialize)]
+            struct ProfileCount {
+                name: String,
+                count: usize,
+            }
+
+            #[derive(Serialize)]
+            struct IntegrityJson {
+                ok: usize,
+                corrupted: usize,
+            }
+
+            let config_json = json!({
+                "backup_dir": config.core.backup_dir,
+                "encryption_available": config.encryption_available(),
+                "profiles_count": config.profiles.len(),
+            });
+
+            let profiles_vec: Vec<ProfileCount> = stats
+                .profiles
+                .iter()
+                .map(|(name, &count)| ProfileCount {
+                    name: name.clone(),
+                    count,
+                })
+                .collect();
+
+            let recent = if history {
+                let mut all = storage.list_all().unwrap_or_default();
+                all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+                Some(all.into_iter().take(10).collect::<Vec<_>>())
+            } else {
+                None
+            };
+
+            let response = StatusResponse {
+                status: "success".to_string(),
+                config: config_json,
+                storage: StorageStatsJson {
+                    total_backups: stats.total_backups,
+                    total_size: stats.total_size,
+                    total_size_human: crate::utils::bytes_to_human(stats.total_size),
+                    profiles: profiles_vec,
+                },
+                integrity: integrity_summary.map(|(ok, corrupted)| IntegrityJson { ok, corrupted }),
+                recent_backups: recent,
+            };
+
+            println!("{}", serde_json::to_string_pretty(&response)?);
+            return Ok(());
+        }
+
+        // Human-readable output
+        if !summary {
+            println!("Configuration:");
+            println!("  Backup directory: {}", config.core.backup_dir.display());
+
+            let key_exists = config.crypto.master_key_path.exists();
+            println!(
+                "  Encryption: {}",
+                if key_exists {
+                    format!(
+                        "✓ (Kuznechik GOST R 34.12-2015)\n  Key: {}",
+                        config.crypto.master_key_path.display()
+                    )
+                } else {
+                    "✗".to_string()
                 }
+            );
+            println!("  Profiles configured: {}", config.profiles.len());
+        }
 
-                if summary {
-                    if let Ok(stats) = storage.get_storage_stats() {
+        if show_storage || !summary {
+            println!("\nStorage status:");
+            print!("{}", stats.display());
+        }
+
+        if let Some((ok, corrupted)) = integrity_summary {
+            println!("\nIntegrity check summary:");
+            println!("  OK: {}", ok);
+            println!("  Corrupted: {}", corrupted);
+            if corrupted > 0 {
+                println!("  [WARNING] Some backups are corrupted!");
+            }
+        }
+
+        if history && !summary {
+            println!("\nRecent backup history:");
+            match storage.list_all() {
+                Ok(backups) => {
+                    let mut sorted = backups;
+                    sorted.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+                    for backup in sorted.iter().take(10) {
+                        let enc = if backup.encrypted.unwrap_or(false) { "🔒" } else { "🔓" };
                         println!(
-                            "Backups: {}, Size: {}",
-                            stats.total_backups,
-                            crate::storage::bytes_to_human(stats.total_size)
+                            "  {} {} [{}] {} ({})",
+                            backup.timestamp.format("%Y-%m-%d %H:%M"),
+                            enc,
+                            backup.backup_type,
+                            backup.profile,
+                            crate::utils::bytes_to_human(backup.size_encrypted)
                         );
                     }
                 }
+                Err(e) => println!("  Could not list backups: {}", e),
             }
-            Err(e) => {
-                println!("Warning: Could not load configuration: {}", e);
-            }
+        }
+
+        if summary {
+            println!(
+                "Backups: {}, Size: {}",
+                stats.total_backups,
+                crate::utils::bytes_to_human(stats.total_size)
+            );
         }
 
         Ok(())
     }
+
 
     fn cmd_verify(
         &self,
@@ -660,7 +1278,7 @@ impl Cli {
         _profile_filter: Option<&str>,
         progress: bool,
     ) -> Result<()> {
-        println!("KRYBS {} command 'verify' called", crate::VERSION);
+        info!("KRYBS {} command 'verify' called", crate::VERSION);
 
         let config = crate::config::Config::load(self.config.as_deref()).unwrap_or_default();
         let backup_dir = self
@@ -674,6 +1292,7 @@ impl Cli {
         if let Some(id) = backup_id {
             // Verify single backup
             println!("Verifying backup: {} (quick={})", id, quick);
+            info!("Verifying single backup {}", id);
 
             let result = tokio::runtime::Runtime::new()?.block_on(
                 engine.verify_backup(id, quick, progress)
@@ -693,6 +1312,7 @@ impl Cli {
                         println!("   ❌ Corrupted files: {}", result.files_corrupted.len());
                     }
                 }
+                info!("Backup {} verified OK", id);
                 Ok(())
             } else {
                 println!("\n❌ [ERROR] Backup verification failed");
@@ -717,11 +1337,13 @@ impl Cli {
                         println!("     ... and {} more", result.files_corrupted.len() - 5);
                     }
                 }
+                error!("Backup {} verification failed", id);
                 Err(anyhow!("Backup verification failed"))
             }
         } else {
             // Verify all backups
             println!("Verifying all backups...");
+            info!("Verifying all backups");
 
             let storage = self.storage()?;
             let backups = storage.list_all()?;
@@ -748,8 +1370,10 @@ impl Cli {
             println!("  Failed: {}", error_count);
 
             if error_count > 0 {
+                error!("Some backups failed verification");
                 Err(anyhow!("Some backups failed verification"))
             } else {
+                info!("All backups verified OK");
                 Ok(())
             }
         }
@@ -764,7 +1388,7 @@ impl Cli {
         remove_corrupted: bool,
         force: bool,
     ) -> Result<()> {
-        println!("KRYBS {} command 'cleanup' called", crate::VERSION);
+        info!("KRYBS {} command 'cleanup' called", crate::VERSION);
 
         if let Some(keep) = keep_last {
             println!("Keep last {} backups", keep);
@@ -844,6 +1468,7 @@ impl Cli {
                     );
                 }
             } else {
+                warn!("max-age format not supported, use '7d', '30d', etc.");
                 println!("Warning: max-age format not supported, use '7d', '30d', etc.");
             }
         }
@@ -886,7 +1511,7 @@ impl Cli {
                 }
                 println!(
                     "\nTotal space to free: {}",
-                    crate::storage::bytes_to_human(to_delete.iter().map(|b| b.size_encrypted).sum())
+                    crate::utils::bytes_to_human(to_delete.iter().map(|b| b.size_encrypted).sum())
                 );
             } else if force {
                 println!("\nDeleting backups (force mode)...");
@@ -902,7 +1527,7 @@ impl Cli {
                 println!("\n[SUCCESS] Cleanup completed");
                 println!(
                     "  Freed space: {}",
-                    crate::storage::bytes_to_human(freed_space)
+                    crate::utils::bytes_to_human(freed_space)
                 );
                 println!("  Remaining backups: {}", to_keep.len());
             } else {
@@ -913,12 +1538,12 @@ impl Cli {
                         backup.id,
                         backup.profile,
                         backup.timestamp.format("%Y-%m-%d"),
-                        crate::storage::bytes_to_human(backup.size_encrypted)
+                        crate::utils::bytes_to_human(backup.size_encrypted)
                     );
                 }
                 println!(
                     "\nTotal space to free: {}",
-                    crate::storage::bytes_to_human(to_delete.iter().map(|b| b.size_encrypted).sum())
+                    crate::utils::bytes_to_human(to_delete.iter().map(|b| b.size_encrypted).sum())
                 );
                 println!("\nRun with --force to delete these backups");
             }
@@ -936,7 +1561,7 @@ impl Cli {
         recovery: bool,
         comment: Option<&str>,
     ) -> Result<()> {
-        println!("KRYBS {} command 'keygen' called", crate::VERSION);
+        info!("KRYBS {} command 'keygen' called", crate::VERSION);
 
         let key = crate::crypto::KuznechikCipher::generate_key();
 
@@ -985,7 +1610,7 @@ impl Cli {
         examples: bool,
         set_backup_dir: Option<&Path>,
     ) -> Result<()> {
-        println!("KRYBS {} command 'init-config' called", crate::VERSION);
+        info!("KRYBS {} command 'init-config' called", crate::VERSION);
 
         if interactive {
             println!("Interactive mode enabled");
@@ -1034,7 +1659,7 @@ impl Cli {
                 backup.id,
                 backup.timestamp.format("%Y-%m-%d %H:%M:%S"),
                 backup.file_count,
-                crate::storage::bytes_to_human(backup.size_encrypted)
+                crate::utils::bytes_to_human(backup.size_encrypted)
             );
             println!("    Profile: {}", backup.profile);
             if let Some(checksum) = &backup.checksum {
@@ -1050,7 +1675,7 @@ impl Cli {
                     .timestamp
                     .with_timezone(&chrono::Local)
                     .format("%Y-%m-%d %H:%M"),
-                crate::storage::bytes_to_human(backup.size_encrypted)
+                crate::utils::bytes_to_human(backup.size_encrypted)
             );
         }
     }
@@ -1088,6 +1713,7 @@ impl Cli {
 
         if error_count > 0 {
             println!("[WARNING] Some backups are corrupted!");
+            warn!("Some backups are corrupted");
         }
 
         Ok(())
@@ -1116,7 +1742,7 @@ impl Cli {
                 encryption_status,
                 backup.backup_type,
                 backup.profile,
-                crate::storage::bytes_to_human(backup.size_encrypted)
+                crate::utils::bytes_to_human(backup.size_encrypted)
             );
         }
 

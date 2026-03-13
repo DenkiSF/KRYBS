@@ -55,7 +55,6 @@ fn test_cli_backup_without_config() -> Result<(), Box<dyn std::error::Error>> {
     source_dir.child("test.txt").write_str("test content")?;
 
     let mut cmd = Command::cargo_bin("krybs")?;
-    // Здесь нет --config, только команда backup
     cmd.args(&[
         "backup",
         "--backup-dir",
@@ -64,7 +63,7 @@ fn test_cli_backup_without_config() -> Result<(), Box<dyn std::error::Error>> {
     ]);
     
     // Бэкап должен создать директорию и выполниться успешно
-    cmd.assert().success().stdout(predicates::str::contains("Backup completed successfully"));
+    cmd.assert().success().stdout(predicates::str::contains("[SUCCESS] Backup created:"));
     
     // Проверяем, что бэкап создан
     let entries: Vec<_> = std::fs::read_dir(temp_dir.path())?

@@ -173,6 +173,10 @@ pub struct CoreConfig {
     #[serde(default = "default_log_level")]
     pub log_level: String,
 
+    /// Максимальное количество хранимых файлов лога (для ротации)
+    #[serde(default = "default_max_log_files")]
+    pub max_log_files: u32,
+
     /// Максимальный размер лог-файла (в мегабайтах)
     #[serde(default = "default_max_log_size")]
     pub max_log_size: u64,
@@ -184,6 +188,13 @@ pub struct CoreConfig {
     /// Путь для временных файлов
     #[serde(default = "default_temp_dir")]
     pub temp_dir: PathBuf,
+
+    /// Путь для логов
+    #[serde(default = "default_log_file")]
+    pub log_file: PathBuf,
+}
+fn default_log_file() -> PathBuf {
+    PathBuf::from("/var/log/krybs.log")
 }
 
 fn default_backup_dir() -> PathBuf {
@@ -210,15 +221,22 @@ fn default_temp_dir() -> PathBuf {
     PathBuf::from("/tmp/krybs")
 }
 
+fn default_max_log_files() -> u32 {
+    5
+}
+
 impl Default for CoreConfig {
     fn default() -> Self {
         Self {
             backup_dir: default_backup_dir(),
             enable_logging: default_enable_logging(),
             log_level: default_log_level(),
+            max_log_files: default_max_log_files(),
             max_log_size: default_max_log_size(),
             keep_failed: default_keep_failed(),
             temp_dir: default_temp_dir(),
+            log_file: default_log_file(),
+
         }
     }
 }
@@ -392,6 +410,12 @@ impl Config {
                     "compress_old level must be between 0-9".to_string(),
                 ));
             }
+        }
+        
+        if self.core.max_log_files == 0 {
+            return Err(ConfigError::Invalid(
+                "max_log_files must be greater than 0".to_string(),
+            ));
         }
 
         Ok(())

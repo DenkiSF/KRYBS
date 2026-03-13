@@ -1,10 +1,15 @@
-// src/storage.rs
+// src/storage/mod.rs
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use crate::utils; // для bytes_to_human и human_to_bytes
+
+pub mod s3_uploader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BackupType {
@@ -28,7 +33,7 @@ pub struct BackupInfo {
     pub profile: String,
     pub file_count: u64,
     pub size_encrypted: u64, // в байтах
-    pub checksum: Option<String>, // SHA256 зашифрованного архива
+    pub checksum: Option<String>, // хеш (Стрибог) зашифрованного архива
     pub encrypted: Option<bool>,
 }
 
@@ -41,7 +46,7 @@ pub struct LocalIndex {
     pub file_count: u64,
     pub size_encrypted: String, // человекочитаемый формат
     pub encrypted: Option<bool>,
-    pub checksum: Option<String>, // SHA256 зашифрованного архива
+    pub checksum: Option<String>,
 }
 
 impl From<&BackupInfo> for LocalIndex {
@@ -52,7 +57,7 @@ impl From<&BackupInfo> for LocalIndex {
             timestamp: info.timestamp,
             profile: info.profile.clone(),
             file_count: info.file_count,
-            size_encrypted: bytes_to_human(info.size_encrypted),
+            size_encrypted: utils::bytes_to_human(info.size_encrypted),
             encrypted: info.encrypted,
             checksum: info.checksum.clone(),
         }
@@ -65,27 +70,13 @@ impl From<BackupInfo> for LocalIndex {
     }
 }
 
-/// Преобразует байты в человекочитаемый формат
-pub fn bytes_to_human(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut size = bytes as f64;
-    let mut unit_idx = 0;
-
-    while size >= 1024.0 && unit_idx < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit_idx += 1;
-    }
-
-    format!("{:.2}{}", size, UNITS[unit_idx])
-}
-
 #[derive(Debug, Clone)]
 pub struct BackupStorage {
     backup_dir: PathBuf,
 }
 
 impl BackupStorage {
-    /// Создает новое хранилище по указанному пути
+    /// Создаёт новое хранилище по указанному пути
     pub fn new(root: &str) -> Self {
         Self {
             backup_dir: PathBuf::from(root),
@@ -107,17 +98,17 @@ impl BackupStorage {
     /// Возвращает время последнего бэкапа для указанного профиля
     pub fn last_backup_time_for_profile(&self, profile: &str) -> Result<Option<DateTime<Utc>>> {
         let backups = self.list_all()?;
-        
+
         // Фильтруем бэкапы по профилю и находим самый свежий
         let last = backups
             .into_iter()
             .filter(|b| b.profile == profile)
             .max_by_key(|b| b.timestamp)
             .map(|b| b.timestamp);
-        
+
         Ok(last)
     }
-    
+
     /// Читает локальный индекс бэкапа
     pub fn read_local_index(&self, id: &str) -> Result<LocalIndex> {
         let backup_path = self.backup_path(id);
@@ -177,7 +168,7 @@ impl BackupStorage {
         let local_index = self.read_local_index(id)?;
 
         // Конвертируем человекочитаемый размер обратно в байты
-        let size_bytes = human_to_bytes(&local_index.size_encrypted).unwrap_or(0);
+        let size_bytes = utils::human_to_bytes(&local_index.size_encrypted).unwrap_or(0);
 
         Ok(BackupInfo {
             id: local_index.backup_id,
@@ -186,7 +177,7 @@ impl BackupStorage {
             profile: local_index.profile,
             file_count: local_index.file_count,
             size_encrypted: size_bytes,
-            checksum: local_index.checksum.clone(), // ✅ теперь контрольная сумма сохраняется
+            checksum: local_index.checksum.clone(),
             encrypted: local_index.encrypted,
         })
     }
@@ -287,7 +278,7 @@ impl StorageStats {
         output.push_str(&format!("Total backups: {}\n", self.total_backups));
         output.push_str(&format!(
             "Total size: {}\n",
-            bytes_to_human(self.total_size)
+            utils::bytes_to_human(self.total_size)
         ));
 
         if !self.profiles.is_empty() {
@@ -299,27 +290,4 @@ impl StorageStats {
 
         output
     }
-}
-
-/// Преобразует человекочитаемый размер в байты
-fn human_to_bytes(human: &str) -> Option<u64> {
-    let human = human.trim().to_lowercase();
-    let units = [
-        ("tb", 1024u64.pow(4)),
-        ("gb", 1024u64.pow(3)),
-        ("mb", 1024u64.pow(2)),
-        ("kb", 1024u64),
-        ("b", 1),
-    ];
-
-    for (unit, multiplier) in units {
-        if human.ends_with(unit) {
-            let num_str = &human[..human.len() - unit.len()];
-            if let Ok(num) = num_str.trim().parse::<f64>() {
-                return Some((num * multiplier as f64) as u64);
-            }
-        }
-    }
-
-    human.parse::<u64>().ok()
 }

@@ -1,45 +1,35 @@
 // src/backup.rs
-use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, Utc};
-use filetime::FileTime;
-use flate2::read::GzDecoder;
-use flate2::write::GzEncoder;
-use globset::{Glob, GlobSet, GlobSetBuilder};
-use indicatif::{ProgressBar, ProgressStyle};
-use sha2::{Digest, Sha256};
+
+use anyhow::{bail, Context, Result};
+use log::info;
+use serde_json::{json, Value};
 use std::fs;
-use std::io::Read;
+use std::io::copy;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tar::{Archive, Builder};
+use chrono::{DateTime, Duration, Utc};
+use flate2::{read::GzDecoder, write::GzEncoder};
+use tar::{Archive, Builder, Header};
+use indicatif::{ProgressBar, ProgressStyle};
+use filetime::FileTime;
+use serde::Serialize;
+
+use crate::config::Config;
+use crate::crypto::Crypto;
+use crate::source::{BackupSource, file::FileSource};
+use crate::storage::{BackupInfo, BackupStorage, BackupType};
+use crate::utils::{calculate_file_hash, bytes_to_human};
 
 #[cfg(unix)]
 use nix::unistd::{chown, Gid, Uid};
 
-use crate::config::Config;
-use crate::crypto::Crypto;
-use crate::storage::{BackupInfo, BackupStorage, BackupType};
+pub use crate::source::file::FileInfo;
 
 // ============================================================================
 // Structures
 // ============================================================================
 
-#[derive(Debug, Clone)]
-pub struct FileInfo {
-    pub path: PathBuf,
-    pub size: u64,
-    pub mtime: DateTime<Utc>,
-    pub hash: String,
-    pub mode: Option<u32>,
-    #[cfg(unix)]
-    pub uid: Option<u32>,
-    #[cfg(unix)]
-    pub gid: Option<u32>,
-    pub is_symlink: bool,
-    pub symlink_target: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BackupResult {
     pub id: String,
     pub backup_type: BackupType,
@@ -83,6 +73,12 @@ pub struct BackupEngine {
     pub crypto: Crypto,
 }
 
+#[derive(Debug, Clone)]
+pub struct SingleSourceResult {
+    pub file_count: usize,
+    pub metadata: Value,
+}
+
 // ============================================================================
 // Implementation BackupEngine
 // ============================================================================
@@ -93,7 +89,7 @@ impl BackupEngine {
             match Crypto::load_key(&config.crypto.master_key_path) {
                 Ok(key) => {
                     println!("[INFO] Encryption enabled with Kuznechik cipher");
-                    Crypto::new_with_key(key)
+                    Crypto::new_with_key(*key)  // разыменовываем Zeroizing
                 }
                 Err(e) => {
                     eprintln!("[WARN] Failed to load encryption key: {}", e);
@@ -114,7 +110,279 @@ impl BackupEngine {
     }
 
     // ------------------------------------------------------------------------
-    // Backup creation
+    // New core method: create backup from generic sources
+    // ------------------------------------------------------------------------
+
+    pub async fn create_backup_from_sources(
+        &self,
+        mut sources: Vec<Box<dyn BackupSource>>,
+        profilename: Option<&str>,
+        progress: bool,
+    ) -> Result<BackupResult> {
+        let start_time = Utc::now();
+        let profile = profilename.unwrap_or("manual").to_string();
+        
+        info!("Starting backup for profile: {}, sources: {}", profile, sources.len());
+        
+        // Фильтр пустых источников
+        sources.retain(|s| !s.is_empty());
+        if sources.is_empty() {
+            bail!("No data to backup: all sources empty");
+        }
+        
+        let total_size_hint: u64 = sources.iter()
+            .filter_map(|s| s.size_hint())
+            .sum();
+        
+        info!("Total estimated size: {}", bytes_to_human(total_size_hint));
+        
+        let backup_id = self.storage.generate_id(BackupType::Full, start_time);
+        let backup_dir = self.storage.backup_path(&backup_id);
+        fs::create_dir_all(&backup_dir).context("Failed to create backup directory")?;
+        
+        // === ОСНОВНАЯ ЛОГИКА: Multiple Sources ===
+        let mut source_archives = Vec::new();
+        let mut total_file_count = 0;
+        
+        for (i, mut source) in sources.into_iter().enumerate() {
+            let source_name = source.name().to_string();
+            info!("Processing source {}: {} ({} bytes)", i, source_name, source.size_hint().unwrap_or(0));
+            
+            // Создаем временный архив для источника
+            let source_tar_path = backup_dir.join(format!("source_{}_{}.tar.gz", i, source_name.replace('/', "_")));
+            let source_tar_result = self.create_single_source_archive(source.as_mut(), &source_tar_path).await?;
+            let file_count = source_tar_result.file_count;
+            source_archives.push((source_name, source_tar_path, source_tar_result));
+            total_file_count += file_count;
+        }
+        
+        // Объединяем в финальный архив
+        let final_archive_path = backup_dir.join("data.tar.gz");
+        self.create_combined_archive(&source_archives, &final_archive_path, progress)?;
+        
+        let final_archive_size = fs::metadata(&final_archive_path)?.len();
+        
+        // Шифрование (если включено)
+        let (encrypted_path, encrypted_size, is_encrypted) = if self.crypto.is_enabled() {
+            let enc_path = final_archive_path.with_file_name("data.tar.gz.enc");
+            info!("Encrypting combined archive...");
+            self.crypto.encrypt_file(&final_archive_path, &enc_path)?;
+            if self.config.crypto.delete_plain {
+                fs::remove_file(&final_archive_path)?;
+            }
+            let size = fs::metadata(&enc_path)?.len();
+            (enc_path, size, true)
+        } else {
+            (final_archive_path, final_archive_size, false)
+        };
+        
+        // Удаляем временные архивы источников (больше не нужны)
+        for (_, source_path, _) in &source_archives {
+            if source_path.exists() {
+                fs::remove_file(source_path)?;
+            }
+        }
+        
+        // Манифест с информацией о sources
+        let manifest = self.create_multi_source_manifest(&source_archives, is_encrypted)?;
+        let manifest_path = backup_dir.join("manifest.json");
+        fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+        
+        let backup_info = BackupInfo {
+            id: backup_id.clone(),
+            backup_type: BackupType::Full,
+            timestamp: start_time,
+            profile: profile.clone(),
+            file_count: total_file_count as u64,
+            size_encrypted: encrypted_size,
+            checksum: Some(calculate_file_hash(&encrypted_path)?),
+            encrypted: Some(is_encrypted),
+        };
+        
+        self.storage.write_local_index(&backup_info)?;
+        
+        let end_time = Utc::now();
+        let duration_secs = end_time.signed_duration_since(start_time).num_milliseconds() as f64 / 1000.0;
+        
+        let result = BackupResult {
+            id: backup_id,
+            backup_type: BackupType::Full,
+            timestamp: start_time,
+            profile,
+            file_count: total_file_count,
+            size_bytes: total_size_hint,
+            archive_size: encrypted_size,
+            encrypted: is_encrypted,
+            duration_secs,
+        };
+        
+        info!("SUCCESS: Backup created {}", result.id);
+        Ok(result)
+    }
+
+    pub fn verify_restored(&self, backup_id: &str, dest: &Path) -> Result<VerificationResult> {
+        let mut result = VerificationResult {
+            backup_id: backup_id.to_string(),
+            quick: false,
+            archive_ok: true,
+            decryption_ok: true,
+            extraction_ok: true,
+            files_checked: 0,
+            files_matched: 0,
+            files_missing: Vec::new(),
+            files_corrupted: Vec::new(),
+            errors: Vec::new(),
+        };
+
+        // Загружаем манифест
+        let backup_path = self.storage.backup_path(backup_id);
+        let manifest_path = backup_path.join("manifest.json");
+        if !manifest_path.exists() {
+            result.errors.push("Manifest not found".to_string());
+            return Ok(result);
+        }
+        let manifest_content = fs::read_to_string(manifest_path)?;
+        let manifest: Value = serde_json::from_str(&manifest_content)?;
+
+        // Получаем список файлов
+        let files = match manifest.get("files").and_then(|v| v.as_array()) {
+            Some(f) => f,
+            None => {
+                result.errors.push("No files list in manifest".to_string());
+                return Ok(result);
+            }
+        };
+
+        result.files_checked = files.len() as u64;
+
+        for file_entry in files {
+            let rel_path = file_entry["rel_path"].as_str().unwrap_or("");
+            let expected_hash = file_entry["hash"].as_str().unwrap_or("");
+            let expected_size = file_entry["size"].as_u64().unwrap_or(0);
+
+            let file_path = dest.join(rel_path);
+
+            if !file_path.exists() {
+                result.files_missing.push(rel_path.to_string());
+                continue;
+            }
+
+            let metadata = match fs::metadata(&file_path) {
+                Ok(m) => m,
+                Err(_) => {
+                    result.files_corrupted.push(format!("{} (can't read metadata)", rel_path));
+                    continue;
+                }
+            };
+
+            if metadata.len() != expected_size {
+                result.files_corrupted.push(format!("{} (size mismatch)", rel_path));
+                continue;
+            }
+
+            let actual_hash = match calculate_file_hash(&file_path) {
+                Ok(h) => h,
+                Err(_) => {
+                    result.files_corrupted.push(format!("{} (can't compute hash)", rel_path));
+                    continue;
+                }
+            };
+
+            if actual_hash == expected_hash {
+                result.files_matched += 1;
+            } else {
+                result.files_corrupted.push(format!("{} (hash mismatch)", rel_path));
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Создает архив для одного источника (просто копирует поток данных в файл)
+    async fn create_single_source_archive(
+        &self,
+        source: &mut dyn BackupSource,
+        tar_path: &Path,
+    ) -> Result<SingleSourceResult> {
+        // Сначала получаем метаданные (immutable borrow)
+        let source_meta = source.metadata();
+        let file_count = source_meta.get("file_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
+        // Затем читаем данные (mutable borrow)
+        let mut reader = source.read()?;
+        let mut file = fs::File::create(tar_path)?;
+        copy(&mut reader, &mut file)?;
+
+        Ok(SingleSourceResult {
+            file_count,
+            metadata: source_meta,
+        })
+    }
+
+    /// Объединяет source архивы в один tar.gz
+    fn create_combined_archive(
+        &self,
+        source_archives: &[(String, PathBuf, SingleSourceResult)],
+        final_path: &Path,
+        _progress: bool,
+    ) -> Result<()> {
+        let file = fs::File::create(final_path)?;
+        let encoder = GzEncoder::new(file, flate2::Compression::default());
+        let mut tar_builder = Builder::new(encoder);
+        
+        for (i, (source_name, source_path, _)) in source_archives.iter().enumerate() {
+            let mut source_file = fs::File::open(source_path)?;
+            let mut header = Header::new_gnu();
+            header.set_size(fs::metadata(source_path)?.len());
+            header.set_cksum();
+            
+            // Используем индекс для имени внутри архива – гарантированно относительный путь
+            let archive_name = format!("source_{}.tar.gz", i);
+            println!("DEBUG: adding to combined archive: {} -> {}", source_name, archive_name);
+            
+            tar_builder.append_data(&mut header, archive_name, &mut source_file)?;
+        }
+        
+        tar_builder.into_inner()?.finish()?;
+        Ok(())
+    }
+
+    /// Манифест для multi-source
+    fn create_multi_source_manifest(
+        &self,
+        source_archives: &[(String, PathBuf, SingleSourceResult)],
+        encrypted: bool,
+    ) -> Result<Value> {
+        let mut all_files = Vec::new();
+        let mut sources_info = Vec::new();
+
+        for (name, path, result) in source_archives {
+            // Добавляем информацию об источнике
+            sources_info.push(json!({
+                "name": name,
+                "path": path.display().to_string(),
+                "file_count": result.file_count,
+                "size": fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+            }));
+
+            // Извлекаем список файлов из метаданных источника
+            if let Some(files) = result.metadata.get("files").and_then(|v| v.as_array()) {
+                all_files.extend(files.clone());
+            }
+        }
+
+        Ok(json!({
+            "backup_type": "full",
+            "timestamp": Utc::now().to_rfc3339(),
+            "encrypted": encrypted,
+            "encryption_algorithm": if encrypted { "GOST R 34.12-2015 Kuznechik" } else { "none" },
+            "sources": sources_info,
+            "files": all_files,      // общий список всех файлов
+        }))
+    }
+
+    // ------------------------------------------------------------------------
+    // Legacy method for backward compatibility
     // ------------------------------------------------------------------------
 
     pub async fn create_backup(
@@ -124,366 +392,46 @@ impl BackupEngine {
         profile_name: Option<&str>,
         progress: bool,
     ) -> Result<BackupResult> {
-        let start_time = Utc::now();
-        let profile = profile_name.unwrap_or("manual");
-
-        println!("[INFO] Starting backup for profile: {}", profile);
-        println!("[INFO] Source paths: {:?}", paths);
-        println!(
-            "[INFO] Encryption: {}",
-            if self.crypto.is_enabled() {
-                "ENABLED (Kuznechik)"
-            } else {
-                "DISABLED"
-            }
-        );
-
-        if !exclude_patterns.is_empty() {
-            println!("[INFO] Exclude patterns: {:?}", exclude_patterns);
-        }
-
-        println!("[INFO] Scanning files...");
-        let files = self.scan_paths(&paths, &exclude_patterns, progress).await?;
-
-        if files.is_empty() {
-            return Err(anyhow::anyhow!("No files found to backup"));
-        }
-
-        let total_size: u64 = files.iter().map(|f| f.size).sum();
-        println!(
-            "[INFO] Found {} files (total: {})",
-            files.len(),
-            crate::storage::bytes_to_human(total_size)
-        );
-
-        let backup_id = self.storage.generate_id(BackupType::Full, start_time);
-        let backup_dir = self.storage.backup_path(&backup_id);
-
-        println!("[INFO] Creating backup directory: {}", backup_dir.display());
-        fs::create_dir_all(&backup_dir).context("Failed to create backup directory")?;
-
-        let tar_path = backup_dir.join("data.tar.gz");
-        println!("[INFO] Creating archive: {}", tar_path.display());
-
-        let archive_size = self.create_tar(&files, &tar_path, progress).await?;
-        self.validate_archive(&tar_path)?;
-
-        let (final_archive_path, final_archive_size, encrypted) = if self.crypto.is_enabled() {
-            let encrypted_path = tar_path.with_file_name("data.tar.gz.enc");
-            println!("[INFO] Encrypting archive with Kuznechik cipher...");
-            self.crypto
-                .encrypt_file(&tar_path, &encrypted_path)
-                .context("Failed to encrypt archive")?;
-            if self.config.crypto.delete_plain {
-                fs::remove_file(&tar_path)?;
-                println!("[INFO] Removed plaintext archive (delete_plain=true)");
-            }
-            let encrypted_size = fs::metadata(&encrypted_path)?.len();
-            (encrypted_path, encrypted_size, true)
-        } else {
-            (tar_path.clone(), archive_size, false)
-        };
-
-        let manifest_path = backup_dir.join("manifest.json");
-        println!("[INFO] Creating manifest: {}", manifest_path.display());
-        let manifest = self.create_manifest(&files, encrypted)?;
-        fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)
-            .context("Failed to write manifest")?;
-
-        let backup_info = BackupInfo {
-            id: backup_id.clone(),
-            backup_type: BackupType::Full,
-            timestamp: start_time,
-            profile: profile.to_string(),
-            file_count: files.len() as u64,
-            size_encrypted: final_archive_size,
-            checksum: Some(calculate_file_hash(&final_archive_path).await?),
-            encrypted: Some(encrypted),
-        };
-
-        self.storage.write_local_index(&backup_info)?;
-
-        let end_time = Utc::now();
-        let duration = end_time.signed_duration_since(start_time);
-        let duration_secs = duration.num_milliseconds() as f64 / 1000.0;
-
-        let result = BackupResult {
-            id: backup_id,
-            backup_type: BackupType::Full,
-            timestamp: start_time,
-            profile: profile.to_string(),
-            file_count: files.len(),
-            size_bytes: total_size,
-            archive_size: final_archive_size,
-            encrypted,
-            duration_secs,
-        };
-
-        println!("\n[SUCCESS] Backup created: {}", result.id);
-        println!("  Profile:      {}", profile);
-        println!("  Files:        {}", files.len());
-        println!(
-            "  Original:     {}",
-            crate::storage::bytes_to_human(total_size)
-        );
-        println!(
-            "  Archive:      {}",
-            crate::storage::bytes_to_human(final_archive_size)
-        );
-
-        if total_size > 0 {
-            let ratio = final_archive_size as f64 / total_size as f64;
-            if final_archive_size < total_size {
-                let compression = (1.0 - ratio) * 100.0;
-                println!("  Compression:  +{:.1}% (saved)", compression);
-            } else if final_archive_size > total_size {
-                let increase = (ratio - 1.0) * 100.0;
-                if encrypted {
-                    println!("  Overhead:     {:.1}% (larger due to metadata + encryption)", increase);
-                } else {
-                    println!("  Overhead:     {:.1}% (larger due to metadata)", increase);
-                }
-            } else {
-                println!("  Compression:  0.0% (no change)");
-            }
-        } else {
-            println!("  Compression:  N/A (empty files)");
-        }
-
-        println!(
-            "  Encryption:   {}",
-            if encrypted { "✓ (Kuznechik)" } else { "✗" }
-        );
-        println!("  Duration:     {:.1}s", duration_secs);
-        println!("  Location:     {}", backup_dir.display());
-
-        Ok(result)
+        let source = FileSource::new(paths, exclude_patterns)?;
+        let sources: Vec<Box<dyn BackupSource>> = vec![Box::new(source)];
+        self.create_backup_from_sources(sources, profile_name, progress).await
     }
 
-    pub async fn scan_paths(
+    // ------------------------------------------------------------------------
+    // Helper: create manifest from sources (deprecated? можно оставить)
+    // ------------------------------------------------------------------------
+
+    fn create_manifest_from_sources(
         &self,
-        paths: &[PathBuf],
-        exclude_patterns: &[String],
-        show_progress: bool,
-    ) -> Result<Vec<FileInfo>> {
-        let mut files = Vec::new();
-        let globset = build_globset(exclude_patterns)?;
+        sources: &[Box<dyn BackupSource>],
+        encrypted: bool,
+    ) -> Result<serde_json::Value> {
+        let sources_meta: Vec<serde_json::Value> = sources.iter().map(|s| s.metadata()).collect();
 
-        let pb = if show_progress {
-            Some(ProgressBar::new_spinner())
-        } else {
-            None
-        };
+        let total_files: u64 = sources_meta
+            .iter()
+            .filter_map(|m| m["file_count"].as_u64())
+            .sum();
 
-        if let Some(ref pb) = pb {
-            pb.set_style(
-                ProgressStyle::default_spinner()
-                    .template("{spinner} Scanning: {pos} files found...")?,
-            );
-        }
+        let total_size: u64 = sources_meta
+            .iter()
+            .filter_map(|m| m["total_size"].as_u64())
+            .sum();
 
-        for path in paths {
-            if !path.exists() {
-                eprintln!("[WARN] Path does not exist: {}", path.display());
-                continue;
-            }
-
-            for entry in walkdir::WalkDir::new(path)
-                .follow_links(false)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
-                let path = entry.path();
-
-                if path.is_dir() {
-                    continue;
-                }
-
-                if let Some(ref globset) = globset {
-                    let path_str = path.to_string_lossy();
-                    if globset.is_match(path_str.as_ref()) {
-                        continue;
-                    }
-                }
-
-                match self.get_file_info(path).await {
-                    Ok(file_info) => {
-                        files.push(file_info);
-                        if let Some(ref pb) = pb {
-                            pb.inc(1);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("[WARN] Skipping {}: {}", path.display(), e);
-                    }
-                }
-            }
-        }
-
-        if let Some(pb) = pb {
-            pb.finish_with_message(format!("Found {} files", files.len()));
-        }
-
-        Ok(files)
+        Ok(serde_json::json!({
+            "backup_type": "full",
+            "timestamp": Utc::now().to_rfc3339(),
+            "encrypted": encrypted,
+            "encryption_algorithm": if encrypted { "GOST R 34.12-2015 (Kuznechik)" } else { "none" },
+            "sources": sources_meta,
+            "total_files": total_files,
+            "total_size": total_size,
+        }))
     }
 
-    async fn get_file_info(&self, path: &Path) -> Result<FileInfo> {
-        let metadata = fs::symlink_metadata(path)
-            .with_context(|| format!("Failed to get metadata for {}", path.display()))?;
-
-        let abs_path = if path.is_relative() {
-            std::env::current_dir()?.join(path)
-        } else {
-            path.to_path_buf()
-        };
-
-        let mtime = metadata
-            .modified()
-            .map(|t| DateTime::<Utc>::from(t))
-            .unwrap_or_else(|_| Utc::now());
-
-        let file_type = metadata.file_type();
-        let is_symlink = file_type.is_symlink();
-
-        let (size, hash, symlink_target) = if is_symlink {
-            let target = fs::read_link(path)
-                .with_context(|| format!("Failed to read symlink target: {}", path.display()))?;
-            (0, String::new(), Some(target))
-        } else if file_type.is_file() {
-            let size = metadata.len();
-            let hash = calculate_file_hash(path).await?;
-            (size, hash, None)
-        } else {
-            return Err(anyhow::anyhow!(
-                "Not a regular file or symlink: {}",
-                path.display()
-            ));
-        };
-
-        #[cfg(unix)]
-        let (mode, uid, gid) = {
-            use std::os::unix::fs::MetadataExt;
-            use std::os::unix::fs::PermissionsExt;
-            let mode = metadata.permissions().mode();
-            let uid = metadata.uid();
-            let gid = metadata.gid();
-            (Some(mode), Some(uid), Some(gid))
-        };
-
-        #[cfg(not(unix))]
-        let (mode, uid, gid) = (None, None, None);
-
-        Ok(FileInfo {
-            path: abs_path,
-            size,
-            mtime,
-            hash,
-            mode,
-            #[cfg(unix)]
-            uid,
-            #[cfg(unix)]
-            gid,
-            is_symlink,
-            symlink_target,
-        })
-    }
-
-    pub async fn create_tar(
-        &self,
-        files: &[FileInfo],
-        output_path: &Path,
-        show_progress: bool,
-    ) -> Result<u64> {
-        let common_root = self.find_common_root(files)?;
-
-        let pb = if show_progress {
-            Some(ProgressBar::new(files.len() as u64))
-        } else {
-            None
-        };
-
-        if let Some(ref pb) = pb {
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner} {msg}\n[{bar:40.cyan/blue}] {pos}/{len} files ({eta})")?
-                    .progress_chars("#>-"),
-            );
-            pb.set_message("Creating archive...");
-        }
-
-        let file = fs::File::create(output_path).context("Failed to create archive file")?;
-        let encoder = GzEncoder::new(file, flate2::Compression::default());
-        let mut tar_builder = Builder::new(encoder);
-
-        for file_info in files {
-            let rel_path = file_info
-                .path
-                .strip_prefix(&common_root)
-                .with_context(|| {
-                    format!(
-                        "Failed to get relative path for {} (root: {})",
-                        file_info.path.display(),
-                        common_root.display()
-                    )
-                })?;
-
-            let mut header = tar::Header::new_gnu();
-            header.set_mtime(file_info.mtime.timestamp() as u64);
-
-            if let Some(mode) = file_info.mode {
-                header.set_mode(mode);
-            }
-
-            #[cfg(unix)]
-            {
-                if let (Some(uid), Some(gid)) = (file_info.uid, file_info.gid) {
-                    header.set_uid(uid.into()); // u32 -> u64
-                    header.set_gid(gid.into()); // u32 -> u64
-                }
-            }
-
-            if file_info.is_symlink {
-                if let Some(target) = &file_info.symlink_target {
-                    header.set_entry_type(tar::EntryType::Symlink);
-                    header.set_size(0);
-                    header.set_cksum();
-                    tar_builder.append_link(&mut header, rel_path, target)?;
-                } else {
-                    eprintln!(
-                        "[WARN] Symlink {} has no target, skipping",
-                        file_info.path.display()
-                    );
-                    continue;
-                }
-            } else {
-                let mut src_file = fs::File::open(&file_info.path).with_context(|| {
-                    format!("Failed to open file: {}", file_info.path.display())
-                })?;
-
-                header.set_size(file_info.size);
-                header.set_entry_type(tar::EntryType::Regular);
-                header.set_cksum();
-                tar_builder.append_data(&mut header, rel_path, &mut src_file)?;
-            }
-
-            if let Some(ref pb) = pb {
-                pb.inc(1);
-            }
-        }
-
-        tar_builder
-            .into_inner()
-            .context("Failed to get inner encoder")?
-            .finish()
-            .context("Failed to finish compression")?;
-
-        if let Some(pb) = pb {
-            pb.finish_with_message("Archive created successfully");
-        }
-
-        let metadata = fs::metadata(output_path)?;
-        Ok(metadata.len())
-    }
+    // ------------------------------------------------------------------------
+    // Archive validation
+    // ------------------------------------------------------------------------
 
     pub fn validate_archive(&self, path: &Path) -> Result<()> {
         println!("[INFO] Validating archive: {}", path.display());
@@ -503,94 +451,6 @@ impl BackupEngine {
 
         println!("[INFO] Archive validation passed: {} files", count);
         Ok(())
-    }
-
-    fn find_common_root(&self, files: &[FileInfo]) -> Result<PathBuf> {
-        if files.is_empty() {
-            return Err(anyhow::anyhow!("No files to backup"));
-        }
-
-        let mut common = files[0]
-            .path
-            .parent()
-            .unwrap_or(&files[0].path)
-            .to_path_buf();
-
-        for file in files.iter().skip(1) {
-            common = self.common_prefix(&common, &file.path);
-            if common.as_os_str().is_empty() {
-                common = file.path.parent().unwrap_or(&file.path).to_path_buf();
-            }
-        }
-
-        if !common.is_absolute() {
-            common = std::env::current_dir()?.join(common);
-        }
-
-        Ok(common)
-    }
-
-    fn common_prefix(&self, a: &Path, b: &Path) -> PathBuf {
-        let a_components: Vec<_> = a.components().collect();
-        let b_components: Vec<_> = b.components().collect();
-
-        let mut common = PathBuf::new();
-
-        for (a_comp, b_comp) in a_components.iter().zip(b_components.iter()) {
-            if a_comp == b_comp {
-                common.push(a_comp);
-            } else {
-                break;
-            }
-        }
-
-        common
-    }
-
-    fn create_manifest(&self, files: &[FileInfo], encrypted: bool) -> Result<serde_json::Value> {
-        let common_root = self.find_common_root(files)?;
-
-        let file_list: Vec<serde_json::Value> = files
-            .iter()
-            .map(|f| {
-                let rel_path = f.path.strip_prefix(&common_root)?;
-                let mut obj = serde_json::json!({
-                    "abs_path": f.path.display().to_string(),
-                    "rel_path": rel_path.display().to_string(),
-                    "size": f.size,
-                    "mtime": f.mtime.to_rfc3339(),
-                    "hash": f.hash,
-                    "is_symlink": f.is_symlink,
-                });
-                if let Some(mode) = f.mode {
-                    obj["mode"] = serde_json::json!(mode);
-                }
-                #[cfg(unix)]
-                {
-                    if let Some(uid) = f.uid {
-                        obj["uid"] = serde_json::json!(uid);
-                    }
-                    if let Some(gid) = f.gid {
-                        obj["gid"] = serde_json::json!(gid);
-                    }
-                }
-                if let Some(target) = &f.symlink_target {
-                    obj["symlink_target"] = serde_json::json!(target.display().to_string());
-                }
-                Ok(obj)
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        Ok(serde_json::json!({
-            "backup_type": "full",
-            "file_count": files.len(),
-            "total_size": files.iter().map(|f| f.size).sum::<u64>(),
-            "timestamp": Utc::now().to_rfc3339(),
-            "common_root": common_root.display().to_string(),
-            "encrypted": encrypted,
-            "encryption_algorithm": if encrypted { "GOST R 34.12-2015 (Kuznechik)" } else { "none" },
-            "files": file_list,
-        }))
     }
 
     // ------------------------------------------------------------------------
@@ -648,7 +508,10 @@ impl BackupEngine {
 
         result.archive_ok = true;
 
-        let mut archive_to_use = archive_path.clone();
+        // Создаём временную директорию для всего процесса верификации
+        let temp_dir = tempfile::tempdir()?;
+        let mut archive_to_use = archive_path.to_path_buf();
+
         if is_encrypted {
             if !self.crypto.is_enabled() {
                 result
@@ -658,13 +521,12 @@ impl BackupEngine {
             }
 
             println!("[VERIFY] Testing decryption...");
-            let temp_dir = tempfile::tempdir()?;
-            let temp_archive = temp_dir.path().join("data.tar.gz");
+            let decrypted_path = temp_dir.path().join("data.tar.gz");
 
-            match self.crypto.decrypt_file(archive_path, &temp_archive) {
+            match self.crypto.decrypt_file(archive_path, &decrypted_path) {
                 Ok(_) => {
                     result.decryption_ok = true;
-                    archive_to_use = temp_archive;
+                    archive_to_use = decrypted_path;
                 }
                 Err(e) => {
                     result.errors.push(format!("Decryption failed: {}", e));
@@ -709,8 +571,7 @@ impl BackupEngine {
         }
 
         println!("[VERIFY] Performing full verification (comparing file contents)...");
-        let verify_dir = tempfile::tempdir()?;
-        let extract_path = verify_dir.path();
+        let extract_path = temp_dir.path();
 
         let file = std::fs::File::open(&archive_to_use)?;
         let decoder = GzDecoder::new(file);
@@ -719,6 +580,26 @@ impl BackupEngine {
             println!("[VERIFY] Extracting archive for verification...");
         }
         archive.unpack(extract_path)?;
+
+        // --- Дополнительно: распаковываем все вложенные архивы ---
+        // Ищем все файлы вида source_*.tar.gz и распаковываем их в ту же директорию
+        let entries: Vec<_> = fs::read_dir(extract_path)?.collect::<Result<Vec<_>, _>>()?;
+        for entry in entries {
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("gz") {
+                if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                    if filename.starts_with("source_") && filename.ends_with(".tar.gz") {
+                        println!("[VERIFY] Extracting nested archive: {}", filename);
+                        let inner_file = fs::File::open(&path)?;
+                        let inner_decoder = GzDecoder::new(inner_file);
+                        let mut inner_archive = Archive::new(inner_decoder);
+                        inner_archive.unpack(extract_path)?;
+                        // Удаляем вложенный архив после распаковки
+                        fs::remove_file(&path)?;
+                    }
+                }
+            }
+        }
 
         let manifest_content = std::fs::read_to_string(&manifest_path)?;
         let manifest: serde_json::Value = serde_json::from_str(&manifest_content)?;
@@ -779,7 +660,7 @@ impl BackupEngine {
                 continue;
             }
 
-            let actual_hash = match calculate_file_hash(&file_path).await {
+            let actual_hash = match calculate_file_hash(&file_path) {
                 Ok(h) => h,
                 Err(_) => {
                     result
@@ -898,85 +779,58 @@ impl BackupEngine {
             pb.set_message("Starting...");
         }
 
+        // Сначала распаковываем основной архив во временную директорию
+        let temp_extract_dir = tempfile::tempdir()?;
         let mut archive = Archive::new(GzDecoder::new(file));
+        archive.unpack(temp_extract_dir.path())?;
 
-        for entry in archive.entries()? {
-            let mut entry = entry?;
-            let path_in_archive = entry.path()?.to_path_buf();
+        // Затем распаковываем все вложенные архивы
+        let entries: Vec<_> = fs::read_dir(temp_extract_dir.path())?.collect::<Result<Vec<_>, _>>()?;
+        for entry in entries {
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("gz") {
+                if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                    if filename.starts_with("source_") && filename.ends_with(".tar.gz") {
+                        if let Some(ref pb) = pb {
+                            pb.set_message(format!("Extracting nested: {}", filename));
+                        }
+                        let inner_file = fs::File::open(&path)?;
+                        let inner_decoder = GzDecoder::new(inner_file);
+                        let mut inner_archive = Archive::new(inner_decoder);
+                        inner_archive.unpack(temp_extract_dir.path())?;
+                    }
+                }
+            }
+        }
 
-            if let Some(specific_path) = specific_path {
-                if !path_in_archive.starts_with(specific_path) {
+        // Теперь копируем/перемещаем все файлы из временной директории в целевую,
+        // применяя фильтр specific_path и overwrite
+        let copy_options = fs_extra::dir::CopyOptions::new()
+            .overwrite(overwrite)
+            .skip_exist(!overwrite);
+
+        // Копируем содержимое временной директории в destination
+        let items_to_copy: Vec<_> = fs::read_dir(temp_extract_dir.path())?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .collect();
+
+        for item in items_to_copy {
+            if let Some(specific) = specific_path {
+                if !item.strip_prefix(temp_extract_dir.path())?.starts_with(specific) {
                     continue;
                 }
             }
 
-            let dest_path = destination.join(&path_in_archive);
-
-            if dest_path.exists() && !overwrite {
-                if let Some(ref pb) = pb {
-                    pb.set_message(format!("Skipping: {} (exists)", path_in_archive.display()));
-                }
-                continue;
-            }
-
-            if let Some(parent) = dest_path.parent() {
+            let dest_item = destination.join(item.strip_prefix(temp_extract_dir.path())?);
+            if let Some(parent) = dest_item.parent() {
                 fs::create_dir_all(parent)?;
             }
 
-            let entry_type = entry.header().entry_type();
-
-            if entry_type == tar::EntryType::Symlink {
-                let link_target = entry.link_name()?.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Symlink entry has no target: {}",
-                        path_in_archive.display()
-                    )
-                })?;
-
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(&link_target, &dest_path)?;
-
-                #[cfg(windows)]
-                {
-                    use std::os::windows::fs::{symlink_file, symlink_dir};
-                    if symlink_file(&link_target, &dest_path).is_err() {
-                        symlink_dir(&link_target, &dest_path)?;
-                    }
-                }
+            if item.is_dir() {
+                fs_extra::dir::copy(&item, destination, &copy_options)?;
             } else {
-                entry.unpack(&dest_path)?;
-            }
-
-            // Restore metadata
-            let header = entry.header();
-
-            if let Ok(mtime) = header.mtime() {
-                let mtime_system = std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime);
-                filetime::set_file_mtime(&dest_path, FileTime::from_system_time(mtime_system))?;
-            }
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Ok(mode) = header.mode() {
-                    fs::set_permissions(&dest_path, fs::Permissions::from_mode(mode))?;
-                }
-
-                if let (Ok(uid), Ok(gid)) = (header.uid(), header.gid()) {
-                    let uid_u32 = u32::try_from(uid)
-                        .context(format!("UID value {} too large for u32", uid))?;
-                    let gid_u32 = u32::try_from(gid)
-                        .context(format!("GID value {} too large for u32", gid))?;
-                    chown(
-                        &dest_path,
-                        Some(Uid::from_raw(uid_u32)),
-                        Some(Gid::from_raw(gid_u32)),
-                    )?;
-                }
-            }
-
-            if let Some(ref pb) = pb {
-                pb.set_message(format!("Extracted: {}", path_in_archive.display()));
+                fs::copy(&item, &dest_item)?;
             }
         }
 
@@ -1019,41 +873,8 @@ impl BackupEngine {
 }
 
 // ============================================================================
-// Helper functions
+// Helper functions (no longer needed, all moved to utils)
 // ============================================================================
-
-fn build_globset(patterns: &[String]) -> Result<Option<GlobSet>> {
-    if patterns.is_empty() {
-        return Ok(None);
-    }
-
-    let mut builder = GlobSetBuilder::new();
-    for pattern in patterns {
-        let glob = Glob::new(pattern)
-            .with_context(|| format!("Invalid glob pattern: {}", pattern))?;
-        builder.add(glob);
-    }
-
-    Ok(Some(builder.build()?))
-}
-
-pub async fn calculate_file_hash(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path)
-        .with_context(|| format!("Failed to open file for hashing: {}", path.display()))?;
-
-    let mut hasher = Sha256::new();
-    let mut buffer = [0; 8192];
-
-    loop {
-        let n = file.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buffer[..n]);
-    }
-
-    Ok(format!("{:x}", hasher.finalize()))
-}
 
 // ============================================================================
 // Tests
@@ -1062,6 +883,7 @@ pub async fn calculate_file_hash(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -1099,13 +921,13 @@ mod tests {
         assert_eq!(files[0].size, 12);
     }
 
-    #[tokio::test]
-    async fn test_calculate_file_hash() -> Result<()> {
+    #[test]
+    fn test_calculate_file_hash() -> Result<()> {
         let temp_dir = tempdir().unwrap();
         let file_path = temp_dir.path().join("test.txt");
         fs::write(&file_path, "test content")?;
 
-        let hash = calculate_file_hash(&file_path).await?;
+        let hash = utils::calculate_file_hash(&file_path)?;
         assert_eq!(hash.len(), 64);
         Ok(())
     }
@@ -1114,7 +936,7 @@ mod tests {
     fn test_build_globset() -> Result<()> {
         let patterns = vec!["*.tmp".to_string(), "cache/*".to_string()];
 
-        let globset = build_globset(&patterns)?;
+        let globset = utils::build_globset(&patterns)?;
         assert!(globset.is_some());
 
         let globset = globset.unwrap();
@@ -1136,36 +958,12 @@ mod tests {
 
         let storage = crate::storage::BackupStorage::new(temp_dir.path().to_str().unwrap());
         let config = Config::default();
-        let engine = BackupEngine::new(storage, config).unwrap();
+        let engine = BackupEngine::new(storage, config)?;
 
-        let files = vec![
-            FileInfo {
-                path: file1.clone(),
-                size: 9,
-                mtime: Utc::now(),
-                hash: calculate_file_hash(&file1).await?,
-                mode: None,
-                #[cfg(unix)]
-                uid: None,
-                #[cfg(unix)]
-                gid: None,
-                is_symlink: false,
-                symlink_target: None,
-            },
-            FileInfo {
-                path: file2.clone(),
-                size: 9,
-                mtime: Utc::now(),
-                hash: calculate_file_hash(&file2).await?,
-                mode: None,
-                #[cfg(unix)]
-                uid: None,
-                #[cfg(unix)]
-                gid: None,
-                is_symlink: false,
-                symlink_target: None,
-            },
-        ];
+        let info1 = engine.get_file_info(&file1)?; // синхронный вызов
+        let info2 = engine.get_file_info(&file2)?;
+
+        let files = vec![info1, info2];
 
         let archive_path = temp_dir.path().join("test.tar.gz");
         let size = engine.create_tar(&files, &archive_path, false).await?;
@@ -1210,6 +1008,7 @@ mod verify_tests {
     use super::*;
     use crate::config::{Config, CoreConfig, CryptoConfig};
     use crate::storage::BackupStorage;
+    use crate::utils;
     use tempfile::tempdir;
     use std::fs;
     use std::path::PathBuf;
@@ -1593,6 +1392,7 @@ mod metadata_tests {
     use super::*;
     use crate::config::Config;
     use crate::storage::BackupStorage;
+    use crate::utils;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -1678,5 +1478,39 @@ mod metadata_tests {
         assert!(restored_mode & 0o111 != 0);
         assert_eq!(restored_mode & 0o777, 0o755);
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use tempfile::tempdir;
+
+        #[tokio::test]
+        async fn test_multiple_sources() -> Result<()> {
+            let temp_dir = tempdir()?;
+            let config = Config::default();
+            let storage = BackupStorage::new(temp_dir.path().to_str().unwrap());
+            let engine = BackupEngine::new(storage, config)?;
+
+            // File source
+            let file_source = FileSource::new(
+                vec![temp_dir.path().join("file1.txt")],
+                vec![]
+            )?;
+
+            // Mock postgres source (или реальный если есть БД)
+            let pg_source = Box::new(MockPostgresSource::new("testdb"));
+
+            let sources: Vec<Box<dyn BackupSource>> = vec![
+                Box::new(file_source),
+                pg_source,
+            ];
+
+            let result = engine.create_backup_from_sources(sources, Some("multi-test"), false).await?;
+
+            assert!(result.file_count > 0);
+            assert!(result.id.len() > 0);
+            Ok(())
+        }
     }
 }
