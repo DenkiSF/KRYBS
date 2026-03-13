@@ -11,7 +11,6 @@ use chrono::{DateTime, Duration, Utc};
 use flate2::{read::GzDecoder, write::GzEncoder};
 use tar::{Archive, Builder, Header};
 use indicatif::{ProgressBar, ProgressStyle};
-use filetime::FileTime;
 use serde::Serialize;
 
 use crate::config::Config;
@@ -20,8 +19,6 @@ use crate::source::{BackupSource, file::FileSource};
 use crate::storage::{BackupInfo, BackupStorage, BackupType};
 use crate::utils::{calculate_file_hash, bytes_to_human};
 
-#[cfg(unix)]
-use nix::unistd::{chown, Gid, Uid};
 
 pub use crate::source::file::FileInfo;
 

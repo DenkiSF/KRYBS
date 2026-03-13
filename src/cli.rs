@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::{Path, PathBuf};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::json;
 use crate::backup::BackupResult;
 use crate::storage::BackupInfo;
 
@@ -491,7 +491,7 @@ impl Cli {
         endpoint: Option<&str>,
         prefix: &str,
         profile_name: Option<&str>,
-        no_verify: bool,
+        _no_verify: bool,
     ) -> Result<()> {
         info!("KRYBS {} command 'backup-s3' called", crate::VERSION);
 
