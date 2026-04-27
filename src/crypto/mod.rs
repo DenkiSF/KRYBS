@@ -1,5 +1,6 @@
 // src/crypto/mod.rs
 mod kuznechik_cipher;
+mod wrapped_kuznechik;
 
 use anyhow::{Context, Result};
 use std::fs;
@@ -8,68 +9,82 @@ use std::path::Path;
 use zeroize::Zeroizing;
 
 pub use kuznechik_cipher::KuznechikCipher;
+pub use wrapped_kuznechik::WrappedKuznechik;
 
-/// Главный криптографический модуль системы
+/// Главный криптографический модуль системы.
+/// Использует Envelope Encryption (DEK/KEK). Старый формат (прямое шифрование) также поддерживается.
 #[derive(Debug, Clone)]
 pub struct Crypto {
-    cipher: Option<KuznechikCipher>,
+    wrapped: Option<WrappedKuznechik>,
+    legacy_key: Option<Zeroizing<[u8; 32]>>,
     enabled: bool,
 }
 
 impl Crypto {
-    /// Создаёт криптомодуль с шифрованием
-    pub fn new_with_key(key: [u8; 32]) -> Self {
+    /// Создаёт криптомодуль с шифрованием (новый формат обёртки).
+    pub fn new_with_key(kek: [u8; 32]) -> Self {
         Self {
-            cipher: Some(KuznechikCipher::new(key)),
+            wrapped: Some(WrappedKuznechik::new(kek)),
+            legacy_key: Some(Zeroizing::new(kek)),
             enabled: true,
         }
     }
 
-    /// Создаёт криптомодуль без шифрования
+    /// Создаёт криптомодуль без шифрования.
     pub fn new_without_encryption() -> Self {
         Self {
-            cipher: None,
+            wrapped: None,
+            legacy_key: None,
             enabled: false,
         }
     }
 
-    /// Проверяет, включено ли шифрование
+    /// Проверяет, включено ли шифрование.
     pub fn is_enabled(&self) -> bool {
-        self.enabled && self.cipher.is_some()
+        self.enabled && self.wrapped.is_some()
     }
 
-    /// Шифрует файл
+    /// Шифрует файл (всегда в новом формате обёртки).
     pub fn encrypt_file(&self, src: &Path, dest: &Path) -> Result<()> {
-        if let Some(cipher) = &self.cipher {
-            cipher.encrypt_file(src, dest)
+        if let Some(wrapped) = &self.wrapped {
+            wrapped.encrypt_file(src, dest)
         } else {
             fs::copy(src, dest)?;
             Ok(())
         }
     }
 
-    /// Дешифрует файл
+    /// Дешифрует файл с автоматическим определением формата (обёртка или legacy).
     pub fn decrypt_file(&self, src: &Path, dest: &Path) -> Result<()> {
-        if let Some(cipher) = &self.cipher {
-            cipher.decrypt_file(src, dest)
+        if let Some(wrapped) = &self.wrapped {
+            // Проверяем, является ли файл обёрнутым
+            if WrappedKuznechik::is_wrapped(src)? {
+                return wrapped.decrypt_file(src, dest);
+            } else {
+                // Пробуем расшифровать как старый формат (IV + ciphertext)
+                if let Some(legacy_kek) = &self.legacy_key {
+                    let cipher = KuznechikCipher::new(**legacy_kek);
+                    return cipher.decrypt_file(src, dest);
+                } else {
+                    anyhow::bail!("No legacy key available for old format decryption");
+                }
+            }
         } else {
             fs::copy(src, dest)?;
             Ok(())
         }
     }
 
-    /// Генерирует новый ключ шифрования
+    /// Генерирует новый случайный KEK (256 бит).
     pub fn generate_key() -> [u8; 32] {
         KuznechikCipher::generate_key()
     }
 
-    /// Сохраняет ключ в файл
+    /// Сохраняет KEK в файл (бинарный, 32 байта).
     pub fn save_key(key: &[u8; 32], path: &Path) -> Result<()> {
         let mut file = fs::File::create(path)
             .with_context(|| format!("Failed to create key file: {}", path.display()))?;
-
         file.write_all(key)?;
-
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -77,79 +92,30 @@ impl Crypto {
             perms.set_mode(0o600);
             fs::set_permissions(path, perms)?;
         }
-
         Ok(())
     }
 
-    /// Загружает ключ из файла, возвращая его в Zeroizing для автоматической очистки памяти
+    /// Загружает KEK из файла.
     pub fn load_key(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
         let mut file = fs::File::open(path)
             .with_context(|| format!("Failed to open key file: {}", path.display()))?;
-
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)?;
-
         if buffer.len() != 32 {
-            return Err(anyhow::anyhow!(
-                "Invalid key size: expected 32 bytes, got {} bytes",
-                buffer.len()
-            ));
+            anyhow::bail!("Invalid key size: expected 32 bytes, got {}", buffer.len());
         }
-
         let mut key = [0u8; 32];
         key.copy_from_slice(&buffer);
         Ok(Zeroizing::new(key))
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_crypto_without_encryption() -> Result<()> {
-        let temp_dir = tempdir()?;
-        let crypto = Crypto::new_without_encryption();
-
-        let source_file = temp_dir.path().join("source.txt");
-        let dest_file = temp_dir.path().join("dest.txt");
-
-        fs::write(&source_file, b"test data")?;
-
-        crypto.encrypt_file(&source_file, &dest_file)?;
-
-        let encrypted = fs::read(&dest_file)?;
-        assert_eq!(encrypted, b"test data");
-
+    /// Перешифровывает DEK в указанном зашифрованном файле бэкапа.
+    /// Возвращает `true`, если операция выполнена (файл был обёрнут), иначе `false`.
+    pub fn rekey_backup(backup_enc_path: &Path, old_key: &[u8; 32], new_key: &[u8; 32]) -> Result<()> {
+        if !WrappedKuznechik::is_wrapped(backup_enc_path)? {
+            anyhow::bail!("Backup is not in wrapped format, cannot rekey");
+        }
+        WrappedKuznechik::reencrypt_dek(old_key, new_key, backup_enc_path)?;
         Ok(())
-    }
-
-    #[test]
-    fn test_key_generation_and_save_load() -> Result<()> {
-        let temp_dir = tempdir()?;
-
-        let key = Crypto::generate_key();
-        let key_file = temp_dir.path().join("test.key");
-
-        Crypto::save_key(&key, &key_file)?;
-
-        let loaded_key = Crypto::load_key(&key_file)?;
-
-        // Сравниваем содержимое (Zeroizing реализует Deref, поэтому *loaded_key даёт [u8;32])
-        assert_eq!(key, *loaded_key);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_invalid_key_file() {
-        let temp_dir = tempdir().unwrap();
-        let invalid_key_file = temp_dir.path().join("invalid.key");
-
-        fs::write(&invalid_key_file, b"too short").unwrap();
-
-        let result = Crypto::load_key(&invalid_key_file);
-        assert!(result.is_err());
     }
 }

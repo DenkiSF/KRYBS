@@ -321,6 +321,32 @@ pub enum Commands {
         #[arg(long)]
         no_verify: bool,
     },
+
+    /// Re-encrypt DEK in backups with a new master key (without touching data)
+    ///
+    /// Example: krybs rekey --old-key /path/to/old.key --new-key /path/to/new.key --backup-id full-20260211-123456
+    #[command(name = "rekey")]
+    Rekey {
+        /// Path to the old master key file
+        #[arg(long)]
+        old_key: PathBuf,
+
+        /// Path to the new master key file
+        #[arg(long)]
+        new_key: PathBuf,
+
+        /// Specific backup ID to rekey (if omitted, rekey all backups)
+        #[arg(long)]
+        backup_id: Option<String>,
+
+        /// Only rekey backups of the given profile
+        #[arg(long)]
+        profile: Option<String>,
+
+        /// Dry run – show what would be done without actual changes
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Serialize)]
@@ -480,6 +506,13 @@ impl Cli {
                 profile.as_deref(),
                 *no_verify,
             ),
+            Commands::Rekey {
+                old_key,
+                new_key,
+                backup_id,
+                profile,
+                dry_run,
+            } => self.cmd_rekey(old_key, new_key, backup_id.as_deref(), profile.as_deref(), *dry_run),
         }
     }
     fn cmd_backup_s3(
@@ -782,6 +815,102 @@ impl Cli {
         }
 
         Ok(())
+    }
+
+    fn cmd_rekey(
+        &self,
+        old_key_path: &Path,
+        new_key_path: &Path,
+        backup_id: Option<&str>,
+        profile: Option<&str>,
+        dry_run: bool,
+    ) -> Result<()> {
+        info!("KRYBS {} command 'rekey' called", crate::VERSION);
+
+        // Загружаем старый и новый KEK
+        let old_key = *crate::crypto::Crypto::load_key(old_key_path)?;
+        let new_key = *crate::crypto::Crypto::load_key(new_key_path)?;
+
+        let config = crate::config::Config::load(self.config.as_deref()).unwrap_or_default();
+        let backup_dir = self.backup_dir.as_deref().unwrap_or(&config.core.backup_dir);
+        let storage = crate::storage::BackupStorage::new(&backup_dir.display().to_string());
+
+        let backups = if let Some(id) = backup_id {
+            // Проверяем существование одного бэкапа
+            let info = storage.read_backup_info(id)?;
+            vec![info]
+        } else {
+            // Получаем все бэкапы, возможно с фильтром по профилю
+            let mut all = storage.list_all()?;
+            if let Some(prof) = profile {
+                all.retain(|b| b.profile == prof);
+            }
+            all
+        };
+
+        if backups.is_empty() {
+            println!("No backups found to rekey.");
+            return Ok(());
+        }
+
+        println!("Found {} backup(s) to process.", backups.len());
+        let mut ok_count = 0;
+        let mut skipped_count = 0;
+        let mut error_count = 0;
+
+        for backup in backups {
+            let backup_path = storage.backup_path(&backup.id);
+            let encrypted_archive = backup_path.join("data.tar.gz.enc");
+            if !encrypted_archive.exists() {
+                println!("  Backup {}: encrypted archive not found (maybe unencrypted), skipping.", backup.id);
+                skipped_count += 1;
+                continue;
+            }
+
+            let is_wrapped = match crate::crypto::WrappedKuznechik::is_wrapped(&encrypted_archive) {
+                Ok(w) => w,
+                Err(e) => {
+                    eprintln!("  Backup {}: error checking format - {}", backup.id, e);
+                    error_count += 1;
+                    continue;
+                }
+            };
+
+            if !is_wrapped {
+                println!("  Backup {}: old format (plain DEK), skipping. Recreate backup to convert.", backup.id);
+                skipped_count += 1;
+                continue;
+            }
+
+            if dry_run {
+                println!("  [DRY RUN] Would rekey backup: {}", backup.id);
+                ok_count += 1;
+                continue;
+            }
+
+            println!("  Rekeying backup: {} ...", backup.id);
+            match crate::crypto::Crypto::rekey_backup(&encrypted_archive, &old_key, &new_key) {
+                Ok(()) => {
+                    println!("    ✓ Successfully rekeyed");
+                    ok_count += 1;
+                }
+                Err(e) => {
+                    eprintln!("    ✗ Failed: {}", e);
+                    error_count += 1;
+                }
+            }
+        }
+
+        println!("\nSummary:");
+        println!("  Successfully rekeyed: {}", ok_count);
+        println!("  Skipped (no need/old format): {}", skipped_count);
+        println!("  Errors: {}", error_count);
+
+        if error_count > 0 {
+            Err(anyhow::anyhow!("Rekey completed with errors"))
+        } else {
+            Ok(())
+        }
     }
 
     fn cmd_backup_postgres(

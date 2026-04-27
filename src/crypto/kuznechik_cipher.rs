@@ -143,6 +143,25 @@ impl KuznechikCipher {
 
         Ok(data[..padding_start].to_vec())
     }
+    /// Шифрует произвольные данные в режиме CBC с заданным ключом и IV.
+    /// Возвращает зашифрованные байты (содержат PKCS#7 padding).
+    pub fn encrypt_data(data: &[u8], key: &[u8; 32], iv: &[u8; 32]) -> Result<Vec<u8>> {
+        let cipher = Kuznechik::new(*key);
+        let padded = Self::padding(data);
+        let ciphertext_blocks = cipher.encrypt_cbc(padded, iv.to_vec());
+        Ok(ciphertext_blocks.into_iter().flatten().collect())
+    }
+
+    /// Дешифрует данные, зашифрованные `encrypt_data`.
+    pub fn decrypt_data(ciphertext: &[u8], key: &[u8; 32], iv: &[u8; 32]) -> Result<Vec<u8>> {
+        let cipher = Kuznechik::new(*key);
+        let plaintext_chunks = cipher.decrypt_cbc(ciphertext.to_vec(), iv.to_vec());
+        let mut plaintext = Vec::new();
+        for chunk in plaintext_chunks {
+            plaintext.extend_from_slice(&chunk);
+        }
+        Self::unpadding(&plaintext)
+    }
 }
 
 impl Clone for KuznechikCipher {
