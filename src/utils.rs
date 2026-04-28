@@ -23,7 +23,7 @@ pub fn build_globset(patterns: &[String]) -> Result<Option<GlobSet>> {
     Ok(Some(builder.build()?))
 }
 
-/// Синхронное вычисление хеша файла по ГОСТ Р 34.11-2012 (Стрибог, 256 бит).
+/// Синхронное вычисление хеша файла по ГОСТ 34.11-2018 (Стрибог, 256 бит).
 pub fn calculate_file_hash(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)
         .with_context(|| format!("Не удалось открыть файл для хеширования: {}", path.display()))?;

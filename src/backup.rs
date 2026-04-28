@@ -90,7 +90,7 @@ impl BackupEngine {
         let crypto = if config.crypto.master_key_path.exists() {
             match Crypto::load_key(&config.crypto.master_key_path) {
                 Ok(key) => {
-                    println!("[ИНФО] Шифрование включено (Кузнечик ГОСТ Р 34.12-2015)");
+                    println!("[ИНФО] Шифрование включено (Кузнечик ГОСТ 34.12-2018)");
                     Crypto::new_with_key(*key)
                 }
                 Err(e) => {
@@ -796,7 +796,7 @@ impl BackupEngine {
     /// Возвращает статус шифрования
     pub fn encryption_status(&self) -> &'static str {
         if self.crypto.is_enabled() {
-            "ВКЛЮЧЕНО (Кузнечик ГОСТ Р 34.12-2015)"
+            "ВКЛЮЧЕНО (Кузнечик ГОСТ 34.12-2018)"
         } else {
             "ОТКЛЮЧЕНО"
         }
