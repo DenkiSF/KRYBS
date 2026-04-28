@@ -24,7 +24,7 @@
 ## Технологический стек
 
 - Язык: **Rust** (edition 2024)
-- Криптография: `libgost-rs` (Кузнечик), `streebog` (Стрибог)
+- Криптография: `[libgost-rs](https://github.com/glukozka-dev/libgost-rs)` (Кузнечик), `streebog` (Стрибог)
 - Архивация: `tar`, `flate2`
 - CLI: `clap`
 - Асинхронность: `tokio`
