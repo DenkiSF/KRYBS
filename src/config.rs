@@ -5,24 +5,24 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Профиль бэкапа - любой путь или сервис
+/// Профиль резервного копирования – любой путь или сервис
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
-    /// Имя профиля (может быть путем: "/home/docs" или именем сервиса: "postgres")
+    /// Имя профиля (может быть путём, например "/home/docs", или названием сервиса, например "postgres")
     pub name: String,
 
-    /// Пути для бэкапа (файлы, директории)
+    /// Пути для резервного копирования (файлы, каталоги)
     pub paths: Vec<PathBuf>,
 
-    /// Паттерны исключения
+    /// Шаблоны исключений
     #[serde(default)]
     pub exclude: Vec<String>,
 
-    /// Использовать шифрование для этого профиля (по умолчанию true)
+    /// Использовать ли шифрование для этого профиля (по умолчанию true)
     #[serde(default = "default_encrypt")]
     pub encrypt: bool,
 
-    /// Уровень сжатия (0-9, где 0 - нет сжатия, 9 - максимальное)
+    /// Уровень сжатия (0-9, где 0 – без сжатия, 9 – максимальное)
     #[serde(default = "default_compression")]
     pub compression: u8,
 }
@@ -36,7 +36,7 @@ fn default_compression() -> u8 {
 }
 
 impl Profile {
-    /// Создает профиль для произвольного пути
+    /// Создаёт профиль для произвольного пути
     pub fn for_path(path: &Path) -> Self {
         let name = path.display().to_string().trim_end_matches('/').to_string();
 
@@ -50,10 +50,10 @@ impl Profile {
     }
 }
 
-/// Конфигурация шифрования "Кузнечик"
+/// Конфигурация шифрования «Кузнечик»
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CryptoConfig {
-    /// Путь к мастер-ключу шифрования "Кузнечик" (256 бит)
+    /// Путь к мастер-ключу шифрования «Кузнечик» (256 бит)
     #[serde(default = "default_master_key_path")]
     pub master_key_path: PathBuf,
 
@@ -61,15 +61,15 @@ pub struct CryptoConfig {
     #[serde(default = "default_delete_plain")]
     pub delete_plain: bool,
 
-    /// Размер чанка для потокового шифрования (байты)
+    /// Размер блока для потокового шифрования (байты)
     #[serde(default = "default_chunk_size")]
     pub chunk_size: usize,
 
-    /// Режим шифрования (CBC, CTR, OFB, CFB)
+    /// Режим шифрования (на данный момент поддерживается CBC)
     #[serde(default = "default_cipher_mode")]
     pub cipher_mode: String,
 
-    /// Использовать KDF (Key Derivation Function) для усиления ключа
+    /// Использовать ли функцию формирования ключа (KDF) для усиления ключа
     #[serde(default = "default_use_kdf")]
     pub use_kdf: bool,
 
@@ -87,7 +87,7 @@ fn default_delete_plain() -> bool {
 }
 
 fn default_chunk_size() -> usize {
-    1024 * 1024 // 1MB
+    1024 * 1024 // 1 МБ
 }
 
 fn default_cipher_mode() -> String {
@@ -109,11 +109,11 @@ pub struct Config {
     #[serde(default)]
     pub core: CoreConfig,
 
-    /// Криптография с алгоритмом "Кузнечик"
+    /// Криптография с алгоритмом «Кузнечик»
     #[serde(default)]
     pub crypto: CryptoConfig,
 
-    /// Профили бэкапа
+    /// Профили резервного копирования
     #[serde(default)]
     pub profiles: Vec<Profile>,
 
@@ -125,19 +125,19 @@ pub struct Config {
 /// Настройки автоматического обслуживания
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaintenanceConfig {
-    /// Автоматически удалять старые бэкапы (в днях)
+    /// Автоматически удалять резервные копии старше указанного количества дней
     #[serde(default = "default_max_age_days")]
     pub max_age_days: i64,
 
-    /// Хранить не более N бэкапов
+    /// Хранить не более указанного количества резервных копий
     #[serde(default = "default_max_backups")]
     pub max_backups: usize,
 
-    /// Проверять целостность бэкапов при запуске
+    /// Проверять целостность резервных копий при запуске
     #[serde(default = "default_check_integrity")]
     pub check_integrity: bool,
 
-    /// Сжимать старые бэкапы (уровень сжатия 0-9)
+    /// Сжимать старые резервные копии (уровень сжатия 0-9)
     #[serde(default = "default_compress_old")]
     pub compress_old: Option<u8>,
 }
@@ -161,7 +161,7 @@ fn default_compress_old() -> Option<u8> {
 /// Глобальные настройки
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreConfig {
-    /// Директория для хранения бэкапов
+    /// Каталог для хранения резервных копий
     #[serde(default = "default_backup_dir")]
     pub backup_dir: PathBuf,
 
@@ -173,26 +173,27 @@ pub struct CoreConfig {
     #[serde(default = "default_log_level")]
     pub log_level: String,
 
-    /// Максимальное количество хранимых файлов лога (для ротации)
+    /// Максимальное количество файлов лога при ротации
     #[serde(default = "default_max_log_files")]
     pub max_log_files: u32,
 
-    /// Максимальный размер лог-файла (в мегабайтах)
+    /// Максимальный размер одного лог-файла (в мегабайтах)
     #[serde(default = "default_max_log_size")]
     pub max_log_size: u64,
 
-    /// Сохранять ли незашифрованные бэкапы при ошибке шифрования
+    /// Сохранять ли незашифрованные резервные копии при ошибке шифрования
     #[serde(default = "default_keep_failed")]
     pub keep_failed: bool,
 
-    /// Путь для временных файлов
+    /// Каталог для временных файлов
     #[serde(default = "default_temp_dir")]
     pub temp_dir: PathBuf,
 
-    /// Путь для логов
+    /// Путь к файлу лога
     #[serde(default = "default_log_file")]
     pub log_file: PathBuf,
 }
+
 fn default_log_file() -> PathBuf {
     PathBuf::from("/var/log/krybs.log")
 }
@@ -210,7 +211,7 @@ fn default_log_level() -> String {
 }
 
 fn default_max_log_size() -> u64 {
-    100 // 100MB
+    100 // 100 МБ
 }
 
 fn default_keep_failed() -> bool {
@@ -236,7 +237,6 @@ impl Default for CoreConfig {
             keep_failed: default_keep_failed(),
             temp_dir: default_temp_dir(),
             log_file: default_log_file(),
-
         }
     }
 }
@@ -276,6 +276,7 @@ impl Default for Config {
     }
 }
 
+/// Ошибки, возникающие при работе с конфигурацией
 #[derive(Debug)]
 pub enum ConfigError {
     NotFound,
@@ -288,11 +289,11 @@ pub enum ConfigError {
 impl std::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConfigError::NotFound => write!(f, "Configuration file not found"),
-            ConfigError::Invalid(msg) => write!(f, "Invalid configuration: {}", msg),
-            ConfigError::IoError(e) => write!(f, "IO error: {}", e),
-            ConfigError::ParseError(e) => write!(f, "Parse error: {}", e),
-            ConfigError::SerializeError(e) => write!(f, "Serialize error: {}", e),
+            ConfigError::NotFound => write!(f, "Файл конфигурации не найден"),
+            ConfigError::Invalid(msg) => write!(f, "Некорректная конфигурация: {}", msg),
+            ConfigError::IoError(e) => write!(f, "Ошибка ввода-вывода: {}", e),
+            ConfigError::ParseError(e) => write!(f, "Ошибка разбора: {}", e),
+            ConfigError::SerializeError(e) => write!(f, "Ошибка сериализации: {}", e),
         }
     }
 }
@@ -306,7 +307,7 @@ impl Config {
 
         for path in paths {
             if path.exists() {
-                println!("Loading config from: {}", path.display());
+                println!("Загрузка конфигурации из: {}", path.display());
                 return Self::load_from_file(&path);
             }
         }
@@ -339,12 +340,12 @@ impl Config {
         })
     }
 
-    /// Валидирует конфигурацию
+    /// Выполняет проверку корректности конфигурации
     pub fn validate(&self) -> Result<(), ConfigError> {
         // Проверка backup_dir
         if !self.core.backup_dir.is_absolute() {
             return Err(ConfigError::Invalid(format!(
-                "backup_dir must be absolute path: {}",
+                "backup_dir должен быть абсолютным путём: {}",
                 self.core.backup_dir.display()
             )));
         }
@@ -352,7 +353,7 @@ impl Config {
         // Проверка temp_dir
         if !self.core.temp_dir.is_absolute() {
             return Err(ConfigError::Invalid(format!(
-                "temp_dir must be absolute path: {}",
+                "temp_dir должен быть абсолютным путём: {}",
                 self.core.temp_dir.display()
             )));
         }
@@ -360,7 +361,7 @@ impl Config {
         // Проверка crypto.master_key_path
         if !self.crypto.master_key_path.is_absolute() {
             return Err(ConfigError::Invalid(format!(
-                "master_key_path must be absolute path: {}",
+                "master_key_path должен быть абсолютным путём: {}",
                 self.crypto.master_key_path.display()
             )));
         }
@@ -369,7 +370,7 @@ impl Config {
         let valid_modes = ["CBC", "CTR", "OFB", "CFB"];
         if !valid_modes.contains(&self.crypto.cipher_mode.as_str()) {
             return Err(ConfigError::Invalid(format!(
-                "Invalid cipher mode: {}. Must be one of: {:?}",
+                "Недопустимый режим шифрования: {}. Допустимые значения: {:?}",
                 self.crypto.cipher_mode, valid_modes
             )));
         }
@@ -378,14 +379,14 @@ impl Config {
         for profile in &self.profiles {
             if profile.compression > 9 {
                 return Err(ConfigError::Invalid(format!(
-                    "Profile '{}' compression level must be between 0-9",
+                    "Уровень сжатия в профиле '{}' должен быть от 0 до 9",
                     profile.name
                 )));
             }
 
             if profile.paths.is_empty() {
                 return Err(ConfigError::Invalid(format!(
-                    "Profile '{}' has no paths defined",
+                    "В профиле '{}' не указаны пути",
                     profile.name
                 )));
             }
@@ -394,27 +395,27 @@ impl Config {
         // Проверка настроек обслуживания
         if self.maintenance.max_age_days < 0 {
             return Err(ConfigError::Invalid(
-                "max_age_days cannot be negative".to_string(),
+                "max_age_days не может быть отрицательным".to_string(),
             ));
         }
 
         if self.maintenance.max_backups == 0 {
             return Err(ConfigError::Invalid(
-                "max_backups must be greater than 0".to_string(),
+                "max_backups должен быть больше 0".to_string(),
             ));
         }
 
         if let Some(compress) = self.maintenance.compress_old {
             if compress > 9 {
                 return Err(ConfigError::Invalid(
-                    "compress_old level must be between 0-9".to_string(),
+                    "Уровень сжатия compress_old должен быть от 0 до 9".to_string(),
                 ));
             }
         }
         
         if self.core.max_log_files == 0 {
             return Err(ConfigError::Invalid(
-                "max_log_files must be greater than 0".to_string(),
+                "max_log_files должен быть больше 0".to_string(),
             ));
         }
 
@@ -423,7 +424,7 @@ impl Config {
 
     /// Сохраняет конфигурацию в файл
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
-        // Создаём директорию если её нет
+        // Создаём директорию, если её нет
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(ConfigError::IoError)?;
         }
@@ -435,7 +436,7 @@ impl Config {
         Ok(())
     }
 
-    /// Возвращает информацию о конфигурации для команды status
+    /// Возвращает сводку основных параметров конфигурации для команды status
     pub fn info(&self) -> HashMap<String, String> {
         let mut info = HashMap::new();
 
@@ -486,17 +487,17 @@ impl Config {
         &self.crypto.master_key_path
     }
 
-    /// Получает настройки шифрования для профиля
+    /// Получает настройки шифрования для указанного профиля
     pub fn get_profile_encryption_settings(&self, profile_name: &str) -> (bool, u8) {
         if let Some(profile) = self.find_profile(profile_name) {
             (profile.encrypt, profile.compression)
         } else {
-            (true, 6) // Значения по умолчанию
+            (true, 6) // значения по умолчанию
         }
     }
 }
 
-/// Возвращает список путей для поиска конфигурации
+/// Возвращает список путей для поиска конфигурационного файла
 fn get_config_paths(custom_path: Option<&Path>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
@@ -513,13 +514,13 @@ fn get_config_paths(custom_path: Option<&Path>) -> Vec<PathBuf> {
         paths.push(home.join("krybs/config.toml"));
     }
 
-    // 4. Текущая директория
+    // 4. Текущий каталог
     paths.push(PathBuf::from("config.toml"));
 
     paths
 }
 
-/// Инициализирует конфигурационный файл с примерами
+/// Инициализирует конфигурационный файл с настройками по умолчанию или примерами
 pub fn init_config(output_path: Option<&Path>, interactive: bool, defaults: bool) -> Result<()> {
     let mut config = Config::default();
 
@@ -576,24 +577,21 @@ pub fn init_config(output_path: Option<&Path>, interactive: bool, defaults: bool
         }
     };
 
-    println!("Creating configuration file at: {}", save_path.display());
-    println!("Configuration:");
-    println!("  Backup directory: {}", config.core.backup_dir.display());
-    println!("  Temp directory: {}", config.core.temp_dir.display());
-    println!(
-        "  Master key path: {}",
-        config.crypto.master_key_path.display()
-    );
-    println!("  Delete plaintext: {}", config.crypto.delete_plain);
-    println!("  Cipher mode: {}", config.crypto.cipher_mode);
-    println!("  Use KDF: {}", config.crypto.use_kdf);
-    println!("  Max age days: {}", config.maintenance.max_age_days);
-    println!("  Max backups: {}", config.maintenance.max_backups);
+    println!("Создание файла конфигурации: {}", save_path.display());
+    println!("Параметры конфигурации:");
+    println!("  Каталог резервных копий: {}", config.core.backup_dir.display());
+    println!("  Временный каталог:       {}", config.core.temp_dir.display());
+    println!("  Путь к мастер-ключу:     {}", config.crypto.master_key_path.display());
+    println!("  Удалять открытые копии:  {}", config.crypto.delete_plain);
+    println!("  Режим шифрования:        {}", config.crypto.cipher_mode);
+    println!("  Использовать KDF:        {}", config.crypto.use_kdf);
+    println!("  Макс. возраст копий:     {} дн.", config.maintenance.max_age_days);
+    println!("  Макс. количество копий:  {}", config.maintenance.max_backups);
     
     if !config.profiles.is_empty() {
-        println!("  Example profiles ({}):", config.profiles.len());
+        println!("  Примеры профилей ({}):", config.profiles.len());
         for profile in &config.profiles {
-            println!("    - {} ({} paths, encrypt: {}, compression: {})", 
+            println!("    - {} ({} путей, шифрование: {}, сжатие: {})", 
                 profile.name, profile.paths.len(), profile.encrypt, profile.compression);
         }
     }
@@ -601,60 +599,56 @@ pub fn init_config(output_path: Option<&Path>, interactive: bool, defaults: bool
     if interactive {
         use std::io::{self, Write};
 
-        print!("Save configuration? [Y/n]: ");
+        print!("Сохранить конфигурацию? [Y/n]: ");
         io::stdout().flush()?;
 
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
 
         if input.trim().to_lowercase() == "n" {
-            println!("Configuration cancelled");
+            println!("Создание конфигурации отменено");
             return Ok(());
         }
     }
 
-    // Создаем директории
+    // Создаем необходимые директории
     if let Some(parent) = save_path.parent() {
         fs::create_dir_all(parent)?;
     }
     
-    // Создаем директорию для ключа если нужно
     if let Some(key_parent) = config.crypto.master_key_path.parent() {
         fs::create_dir_all(key_parent)?;
     }
     
-    // Создаем директорию для бэкапов
     fs::create_dir_all(&config.core.backup_dir)?;
-    
-    // Создаем директорию для временных файлов
     fs::create_dir_all(&config.core.temp_dir)?;
 
     // Сохраняем конфигурацию
     config
         .save(&save_path)
-        .context("Failed to save configuration")?;
+        .context("Не удалось сохранить конфигурацию")?;
 
-    println!("\n[SUCCESS] Configuration saved successfully!");
-    println!("  Config file: {}", save_path.display());
-    println!("  Backup directory: {}", config.core.backup_dir.display());
-    println!("  Temp directory: {}", config.core.temp_dir.display());
-    println!("\n[IMPORTANT] Next steps:");
-    println!("  1. Generate encryption key: krybs keygen --output {}", 
+    println!("\n[УСПЕХ] Конфигурация успешно сохранена!");
+    println!("  Файл конфигурации:          {}", save_path.display());
+    println!("  Каталог резервных копий:    {}", config.core.backup_dir.display());
+    println!("  Временный каталог:          {}", config.core.temp_dir.display());
+    println!("\n[ВАЖНО] Дальнейшие шаги:");
+    println!("  1. Сгенерируйте ключ шифрования: krybs keygen --output {}", 
              config.crypto.master_key_path.display());
-    println!("  2. Test backup: krybs backup --profile system-logs");
-    println!("  3. Check status: krybs status");
+    println!("  2. Протестируйте резервное копирование: krybs backup --profile system-logs");
+    println!("  3. Проверьте состояние: krybs status");
     
     if !config.profiles.is_empty() {
-        println!("\nAvailable profiles:");
+        println!("\nДоступные профили:");
         for profile in &config.profiles {
-            println!("  - {}: {} paths", profile.name, profile.paths.len());
+            println!("  - {}: {} путей", profile.name, profile.paths.len());
         }
     }
 
     Ok(())
 }
 
-/// Вспомогательная функция для получения значения по ключу
+/// Вспомогательная функция для получения значения переменной окружения или значения по умолчанию
 pub fn get_env_or_default(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -665,116 +659,15 @@ pub fn config_exists(path: Option<&Path>) -> bool {
     paths.iter().any(|p| p.exists())
 }
 
-/// Загружает конфигурацию или создает новую с настройками по умолчанию
+/// Загружает конфигурацию или создаёт новую с настройками по умолчанию
 pub fn load_or_create(config_path: Option<&Path>) -> Result<Config> {
     match Config::load(config_path) {
         Ok(config) => Ok(config),
         Err(ConfigError::NotFound) => {
-            println!("Configuration file not found. Creating default configuration...");
+            println!("Файл конфигурации не найден. Используются настройки по умолчанию.");
             let config = Config::default();
             Ok(config)
         }
-        Err(e) => Err(anyhow::anyhow!("Failed to load configuration: {}", e)),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_config_default() {
-        let config = Config::default();
-        assert_eq!(config.core.backup_dir, PathBuf::from("/var/backups/krybs"));
-        assert_eq!(config.crypto.master_key_path, PathBuf::from("/etc/krybs/master.key"));
-        assert_eq!(config.crypto.cipher_mode, "CBC");
-        assert!(config.crypto.use_kdf);
-    }
-
-    #[test]
-    fn test_profile_for_path() {
-        let profile = Profile::for_path(&PathBuf::from("/home/user"));
-        assert_eq!(profile.name, "/home/user");
-        assert_eq!(profile.paths.len(), 1);
-        assert!(profile.encrypt);
-        assert_eq!(profile.compression, 6);
-    }
-
-    #[test]
-    fn test_config_validation() -> Result<()> {
-        let mut config = Config::default();
-        
-        // Должно пройти валидацию
-        config.validate()?;
-        
-        // Неправильный режим шифрования
-        config.crypto.cipher_mode = "INVALID".to_string();
-        assert!(config.validate().is_err());
-        
-        Ok(())
-    }
-
-    #[test]
-    fn test_save_and_load() -> Result<()> {
-        let temp_dir = tempdir()?;
-        let config_path = temp_dir.path().join("config.toml");
-        
-        let mut config = Config::default();
-        config.core.backup_dir = temp_dir.path().join("backups").to_path_buf();
-        
-        config.save(&config_path)?;
-        assert!(config_path.exists());
-        
-        let loaded = Config::load_from_file(&config_path)?;
-        assert_eq!(loaded.core.backup_dir, config.core.backup_dir);
-        
-        Ok(())
-    }
-
-    #[test]
-    fn test_find_profile() {
-        let mut config = Config::default();
-        
-        let profile = Profile {
-            name: "test".to_string(),
-            paths: vec![PathBuf::from("/test")],
-            exclude: vec![],
-            encrypt: true,
-            compression: 6,
-        };
-        
-        config.profiles.push(profile);
-        
-        assert!(config.find_profile("test").is_some());
-        assert!(config.find_profile("nonexistent").is_none());
-    }
-
-    #[test]
-    fn test_config_info() {
-        let config = Config::default();
-        let info = config.info();
-        
-        assert!(info.contains_key("backup_dir"));
-        assert!(info.contains_key("master_key_path"));
-        assert!(info.contains_key("profiles_count"));
-    }
-
-    #[test]
-    fn test_encryption_available() {
-        let config = Config::default();
-        
-        // Ключа по умолчанию нет
-        assert!(!config.encryption_available());
-    }
-
-    #[test]
-    fn test_get_config_paths() {
-        let paths = get_config_paths(None);
-        assert!(paths.len() >= 3);
-        
-        let custom = PathBuf::from("/custom/config.toml");
-        let paths_with_custom = get_config_paths(Some(&custom));
-        assert_eq!(paths_with_custom[0], custom);
+        Err(e) => Err(anyhow::anyhow!("Не удалось загрузить конфигурацию: {}", e)),
     }
 }

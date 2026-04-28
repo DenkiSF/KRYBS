@@ -11,6 +11,7 @@ use crate::utils; // для bytes_to_human и human_to_bytes
 
 pub mod s3_uploader;
 
+/// Тип резервной копии (в настоящий момент поддерживается только полная)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BackupType {
     #[serde(rename = "full")]
@@ -20,11 +21,12 @@ pub enum BackupType {
 impl std::fmt::Display for BackupType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BackupType::Full => write!(f, "full"),
+            BackupType::Full => write!(f, "полная"),
         }
     }
 }
 
+/// Информация о резервной копии, хранящаяся в памяти
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackupInfo {
     pub id: String,
@@ -32,11 +34,12 @@ pub struct BackupInfo {
     pub timestamp: DateTime<Utc>,
     pub profile: String,
     pub file_count: u64,
-    pub size_encrypted: u64, // в байтах
-    pub checksum: Option<String>, // хеш (Стрибог) зашифрованного архива
+    pub size_encrypted: u64,            // размер в байтах
+    pub checksum: Option<String>,       // хеш (Стрибог) зашифрованного архива
     pub encrypted: Option<bool>,
 }
 
+/// Локальный индекс (сериализуется в JSON и сохраняется на диск)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalIndex {
     pub backup_id: String,
@@ -44,7 +47,7 @@ pub struct LocalIndex {
     pub timestamp: DateTime<Utc>,
     pub profile: String,
     pub file_count: u64,
-    pub size_encrypted: String, // человекочитаемый формат
+    pub size_encrypted: String,         // человекочитаемый размер
     pub encrypted: Option<bool>,
     pub checksum: Option<String>,
 }
@@ -70,104 +73,84 @@ impl From<BackupInfo> for LocalIndex {
     }
 }
 
+/// Хранилище резервных копий – управляет директориями, индексами и метаданными
 #[derive(Debug, Clone)]
 pub struct BackupStorage {
     backup_dir: PathBuf,
 }
 
 impl BackupStorage {
-    /// Создаёт новое хранилище по указанному пути
+    /// Создаёт новое хранилище по указанному корневому пути
     pub fn new(root: &str) -> Self {
         Self {
             backup_dir: PathBuf::from(root),
         }
     }
 
-    /// Инициализирует структуру директорий
+    /// Инициализирует структуру каталогов (создаёт корневую папку, если её нет)
     pub fn init(&self) -> Result<()> {
         fs::create_dir_all(&self.backup_dir)
-            .context("Failed to create backup directory")?;
+            .context("Не удалось создать каталог резервных копий")?;
         Ok(())
     }
 
-    /// Возвращает путь к каталогу бэкапа по его ID
+    /// Возвращает путь к каталогу конкретной резервной копии по её идентификатору
     pub fn backup_path(&self, id: &str) -> PathBuf {
         self.backup_dir.join(id)
     }
 
-    /// Возвращает время последнего бэкапа для указанного профиля
+    /// Возвращает время последней резервной копии для указанного профиля
     pub fn last_backup_time_for_profile(&self, profile: &str) -> Result<Option<DateTime<Utc>>> {
         let backups = self.list_all()?;
-
-        // Фильтруем бэкапы по профилю и находим самый свежий
         let last = backups
             .into_iter()
             .filter(|b| b.profile == profile)
             .max_by_key(|b| b.timestamp)
             .map(|b| b.timestamp);
-
         Ok(last)
     }
 
-    /// Читает локальный индекс бэкапа
+    /// Читает локальный индекс резервной копии
     pub fn read_local_index(&self, id: &str) -> Result<LocalIndex> {
         let backup_path = self.backup_path(id);
         let index_path = backup_path.join("index-local.json");
 
         let content = fs::read_to_string(&index_path)
-            .with_context(|| format!("Failed to read index for backup {}", id))?;
+            .with_context(|| format!("Не удалось прочитать индекс для копии {}", id))?;
 
         let index: LocalIndex = serde_json::from_str(&content)
-            .with_context(|| format!("Failed to parse index for backup {}", id))?;
+            .with_context(|| format!("Не удалось разобрать индекс для копии {}", id))?;
 
         Ok(index)
     }
 
-    /// Записывает локальный индекс бэкапа
+    /// Записывает локальный индекс резервной копии
     pub fn write_local_index(&self, info: &BackupInfo) -> Result<()> {
         let backup_path = self.backup_path(&info.id);
-
         fs::create_dir_all(&backup_path)
-            .with_context(|| format!("Failed to create backup directory for {}", info.id))?;
+            .with_context(|| format!("Не удалось создать каталог для копии {}", info.id))?;
 
         let index = LocalIndex::from(info);
         let index_path = backup_path.join("index-local.json");
 
         let content = serde_json::to_string_pretty(&index)
-            .context("Failed to serialize index")?;
+            .context("Не удалось сериализовать индекс")?;
 
         fs::write(&index_path, content)
-            .with_context(|| format!("Failed to write index to {}", index_path.display()))?;
+            .with_context(|| format!("Не удалось записать индекс в {}", index_path.display()))?;
 
         Ok(())
     }
 
-    /// Возвращает список всех бэкапов
+    /// Возвращает список всех резервных копий
     pub fn list_all(&self) -> Result<Vec<BackupInfo>> {
         self.list_backups_in_dir(&self.backup_dir)
     }
 
-    /// Возвращает все бэкапы (для совместимости – каждый бэкап отдельная цепочка)
-    pub fn list_all_chained(&self) -> Result<HashMap<String, Vec<BackupInfo>>> {
-        let mut chains = HashMap::new();
-        let backups = self.list_all()?;
-        for backup in backups {
-            chains.insert(backup.id.clone(), vec![backup.clone()]);
-        }
-        Ok(chains)
-    }
-
-    /// Возвращает информацию о цепочке бэкапов (для совместимости)
-    pub fn get_chain(&self, chain_id: &str) -> Result<Vec<BackupInfo>> {
-        let backup = self.read_backup_info(chain_id)?;
-        Ok(vec![backup])
-    }
-
-    /// Читает полную информацию о бэкапе из индекса
+    /// Читает полную информацию о резервной копии из индекса
     pub fn read_backup_info(&self, id: &str) -> Result<BackupInfo> {
         let local_index = self.read_local_index(id)?;
-
-        // Конвертируем человекочитаемый размер обратно в байты
+        // Преобразуем человекочитаемый размер обратно в байты
         let size_bytes = utils::human_to_bytes(&local_index.size_encrypted).unwrap_or(0);
 
         Ok(BackupInfo {
@@ -182,7 +165,7 @@ impl BackupStorage {
         })
     }
 
-    /// Вспомогательный метод для списка бэкапов в директории
+    /// Вспомогательный метод для чтения списка копий из указанной директории
     fn list_backups_in_dir(&self, dir: &Path) -> Result<Vec<BackupInfo>> {
         let mut backups = Vec::new();
 
@@ -190,8 +173,8 @@ impl BackupStorage {
             return Ok(backups);
         }
 
-        for entry in fs::read_dir(dir).context("Failed to read backup directory")? {
-            let entry = entry.context("Failed to read directory entry")?;
+        for entry in fs::read_dir(dir).context("Не удалось прочитать каталог резервных копий")? {
+            let entry = entry.context("Не удалось прочитать запись каталога")?;
             let path = entry.path();
 
             if path.is_dir() {
@@ -204,42 +187,22 @@ impl BackupStorage {
                 match self.read_backup_info(&backup_id) {
                     Ok(info) => backups.push(info),
                     Err(e) => {
-                        eprintln!("Warning: Failed to read backup {}: {}", backup_id, e);
+                        eprintln!("Предупреждение: не удалось прочитать информацию о копии {}: {}", backup_id, e);
                     }
                 }
             }
         }
 
+        // Сортируем от новых к старым
         backups.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         Ok(backups)
     }
 
-    /// Генерирует ID для нового бэкапа
+    /// Генерирует идентификатор для новой резервной копии
     pub fn generate_id(&self, backup_type: BackupType, timestamp: DateTime<Utc>) -> String {
         let date_str = timestamp.format("%Y%m%d-%H%M%S").to_string();
         match backup_type {
             BackupType::Full => format!("full-{}", date_str),
-        }
-    }
-
-    /// Проверяет целостность бэкапа (базовая проверка наличия файлов)
-    pub fn verify_backup(&self, id: &str) -> Result<bool> {
-        let backup_path = self.backup_path(id);
-
-        if !backup_path.exists() {
-            return Ok(false);
-        }
-
-        let required_files = ["index-local.json", "data.tar.gz", "manifest.json"];
-        for file in required_files {
-            if !backup_path.join(file).exists() {
-                return Ok(false);
-            }
-        }
-
-        match self.read_local_index(id) {
-            Ok(_) => Ok(true),
-            Err(_) => Ok(false),
         }
     }
 
@@ -272,17 +235,18 @@ pub struct StorageStats {
 }
 
 impl StorageStats {
+    /// Человекочитаемое представление статистики
     pub fn display(&self) -> String {
         let mut output = String::new();
 
-        output.push_str(&format!("Total backups: {}\n", self.total_backups));
+        output.push_str(&format!("Всего копий: {}\n", self.total_backups));
         output.push_str(&format!(
-            "Total size: {}\n",
+            "Общий размер: {}\n",
             utils::bytes_to_human(self.total_size)
         ));
 
         if !self.profiles.is_empty() {
-            output.push_str("Backups by profile:\n");
+            output.push_str("Копий по профилям:\n");
             for (profile, count) in &self.profiles {
                 output.push_str(&format!("  {}: {}\n", profile, count));
             }

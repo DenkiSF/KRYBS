@@ -7,12 +7,14 @@ use aws_sdk_s3::Client;
 use std::path::Path;
 use walkdir::WalkDir;
 
+/// Клиент для загрузки резервных копий в S3-совместимое хранилище
 pub struct S3Uploader {
     client: Client,
     bucket: String,
 }
 
 impl S3Uploader {
+    /// Создаёт новый экземпляр, настраивая подключение к указанному бакету
     pub async fn new(bucket: &str, region: &str, endpoint: Option<&str>) -> Result<Self> {
         let region_provider = RegionProviderChain::first_try(
             aws_sdk_s3::config::Region::new(region.to_string())
@@ -39,9 +41,10 @@ impl S3Uploader {
         })
     }
 
+    /// Загружает резервную копию (все файлы из локального каталога) в S3
     pub fn upload_backup(&self, backup_id: &str, local_dir: &Path, prefix: &str) -> Result<()> {
         if !local_dir.exists() {
-            anyhow::bail!("Local backup directory does not exist: {}", local_dir.display());
+            anyhow::bail!("Локальный каталог резервной копии не существует: {}", local_dir.display());
         }
 
         let prefix = if prefix.is_empty() {
@@ -57,23 +60,24 @@ impl S3Uploader {
         {
             let local_path = entry.path();
             let relative = local_path.strip_prefix(local_dir)
-                .expect("should be under root");
+                .expect("должен быть внутри корня");
             let object_key = format!("{}{}", prefix, relative.display());
 
             tokio::runtime::Runtime::new()?.block_on(
                 self.upload_file(local_path, &object_key)
             )?;
 
-            println!("  Uploaded: {}", object_key);
+            println!("  Загружен: {}", object_key);
         }
 
         Ok(())
     }
 
+    /// Загружает отдельный файл в бакет
     async fn upload_file(&self, local_path: &Path, object_key: &str) -> Result<()> {
         let body = ByteStream::from_path(local_path)
             .await
-            .with_context(|| format!("Failed to read file: {}", local_path.display()))?;
+            .with_context(|| format!("Не удалось прочитать файл: {}", local_path.display()))?;
 
         self.client
             .put_object()
@@ -82,7 +86,7 @@ impl S3Uploader {
             .body(body)
             .send()
             .await
-            .with_context(|| format!("Failed to upload {}", object_key))?;
+            .with_context(|| format!("Не удалось загрузить {}", object_key))?;
 
         Ok(())
     }

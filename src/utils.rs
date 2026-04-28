@@ -7,7 +7,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use streebog::{Digest, Streebog256};
 
-/// Строит GlobSet из списка паттернов исключения.
+/// Строит `GlobSet` из списка шаблонов исключений.
 pub fn build_globset(patterns: &[String]) -> Result<Option<GlobSet>> {
     if patterns.is_empty() {
         return Ok(None);
@@ -16,7 +16,7 @@ pub fn build_globset(patterns: &[String]) -> Result<Option<GlobSet>> {
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
         let glob = Glob::new(pattern)
-            .with_context(|| format!("Invalid glob pattern: {}", pattern))?;
+            .with_context(|| format!("Некорректный glob-шаблон: {}", pattern))?;
         builder.add(glob);
     }
 
@@ -26,7 +26,7 @@ pub fn build_globset(patterns: &[String]) -> Result<Option<GlobSet>> {
 /// Синхронное вычисление хеша файла по ГОСТ Р 34.11-2012 (Стрибог, 256 бит).
 pub fn calculate_file_hash(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)
-        .with_context(|| format!("Failed to open file for hashing: {}", path.display()))?;
+        .with_context(|| format!("Не удалось открыть файл для хеширования: {}", path.display()))?;
 
     let mut hasher = Streebog256::new();
     let mut buffer = [0; 8192];
@@ -62,7 +62,7 @@ pub fn common_prefix(a: &Path, b: &Path) -> PathBuf {
 /// Находит общий корневой каталог для списка путей.
 pub fn find_common_root(paths: &[PathBuf]) -> Result<PathBuf> {
     if paths.is_empty() {
-        anyhow::bail!("No paths to find common root");
+        anyhow::bail!("Список путей пуст, невозможно найти общий корень");
     }
 
     let mut common = paths[0].parent().unwrap_or(&paths[0]).to_path_buf();
@@ -79,7 +79,7 @@ pub fn find_common_root(paths: &[PathBuf]) -> Result<PathBuf> {
     Ok(common)
 }
 
-/// Преобразует байты в человекочитаемый формат (B, KB, MB, GB, TB).
+/// Преобразует количество байт в человекочитаемый формат (B, KB, MB, GB, TB).
 pub fn bytes_to_human(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut size = bytes as f64;
@@ -90,10 +90,10 @@ pub fn bytes_to_human(bytes: u64) -> String {
         unit_idx += 1;
     }
 
-    format!("{:.2}{}", size, UNITS[unit_idx])
+    format!("{:.2} {}", size, UNITS[unit_idx])
 }
 
-/// Преобразует человекочитаемый размер обратно в байты (например, "1.5MB" -> 1572864).
+/// Преобразует человекочитаемый размер обратно в байты (например, "1.5 MB" -> 1572864).
 pub fn human_to_bytes(human: &str) -> Option<u64> {
     let human = human.trim().to_lowercase();
     let units = [

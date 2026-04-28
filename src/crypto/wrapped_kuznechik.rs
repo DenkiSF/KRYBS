@@ -8,10 +8,12 @@ use zeroize::Zeroizing;
 
 use super::kuznechik_cipher::KuznechikCipher;
 
+/// Магическая сигнатура обёрнутого контейнера
 const MAGIC: [u8; 4] = *b"KRYB";
+/// Версия формата
 const VERSION: u8 = 1;
-pub const HEADER_SIZE: usize = 4 + 1 + 32 + 48 + 32; // 117 байт (IV_KEK 32 + CIPHER_DEK 48 + IV_DATA 32)
 
+/// Реализация envelope encryption: ключ данных (DEK) шифруется мастер-ключом (KEK).
 #[derive(Debug, Clone)]
 pub struct WrappedKuznechik {
     kek: Zeroizing<[u8; 32]>,
@@ -24,21 +26,21 @@ impl WrappedKuznechik {
         }
     }
 
+    /// Шифрует данные и сохраняет в формате KRYB.
     pub fn encrypt_file(&self, src: &Path, dest: &Path) -> Result<()> {
         let dek = KuznechikCipher::generate_key();
         let iv_data = KuznechikCipher::generate_iv();
 
-        let plaintext = fs::read(src).context("Failed to read source file")?;
+        let plaintext = fs::read(src).context("Не удалось прочитать исходный файл")?;
         let ciphertext_data = KuznechikCipher::encrypt_data(&plaintext, &dek, &iv_data)?;
 
         let iv_kek = KuznechikCipher::generate_iv();
         let cipher_dek = KuznechikCipher::encrypt_data(&dek, &self.kek, &iv_kek)?;
-        // Теперь cipher_dek.len() == 48, так как 32 байта данных + 16 байт padding
         if cipher_dek.len() != 48 {
-            anyhow::bail!("Unexpected encrypted DEK length: {}", cipher_dek.len());
+            anyhow::bail!("Неожиданная длина зашифрованного DEK: {}", cipher_dek.len());
         }
 
-        let mut out = fs::File::create(dest).context("Failed to create destination file")?;
+        let mut out = fs::File::create(dest).context("Не удалось создать выходной файл")?;
         out.write_all(&MAGIC)?;
         out.write_all(&[VERSION])?;
         out.write_all(&iv_kek)?;
@@ -49,22 +51,23 @@ impl WrappedKuznechik {
         Ok(())
     }
 
+    /// Дешифрует контейнер KRYB.
     pub fn decrypt_file(&self, src: &Path, dest: &Path) -> Result<()> {
-        let mut file = fs::File::open(src).context("Failed to open encrypted file")?;
+        let mut file = fs::File::open(src).context("Не удалось открыть зашифрованный файл")?;
 
         let mut magic = [0; 4];
         file.read_exact(&mut magic)?;
         if magic != MAGIC {
-            anyhow::bail!("Not a wrapped Kuznechik archive (invalid magic)");
+            anyhow::bail!("Не является обёрнутым контейнером Кузнечика (неверная магия)");
         }
         let mut version = [0; 1];
         file.read_exact(&mut version)?;
         if version[0] != VERSION {
-            anyhow::bail!("Unsupported version {}", version[0]);
+            anyhow::bail!("Неподдерживаемая версия формата {}", version[0]);
         }
 
         let mut iv_kek = [0; 32];
-        let mut cipher_dek = [0; 48]; // было 32, стало 48
+        let mut cipher_dek = [0; 48];
         let mut iv_data = [0; 32];
         file.read_exact(&mut iv_kek)?;
         file.read_exact(&mut cipher_dek)?;
@@ -72,32 +75,33 @@ impl WrappedKuznechik {
 
         let dek_vec = KuznechikCipher::decrypt_data(&cipher_dek, &self.kek, &iv_kek)?;
         let dek: [u8; 32] = dek_vec.as_slice().try_into()
-            .context("DEK length mismatch after decryption")?;
+            .context("Длина DEK после расшифровки не совпадает")?;
 
         let mut ciphertext_data = Vec::new();
         file.read_to_end(&mut ciphertext_data)?;
 
         let plaintext = KuznechikCipher::decrypt_data(&ciphertext_data, &dek, &iv_data)?;
-        fs::write(dest, plaintext).context("Failed to write decrypted file")?;
+        fs::write(dest, plaintext).context("Не удалось записать расшифрованный файл")?;
         Ok(())
     }
 
+    /// Перешифровывает DEK на месте: расшифровывает старым KEK и зашифровывает новым KEK.
     pub fn reencrypt_dek(old_kek: &[u8; 32], new_kek: &[u8; 32], path: &Path) -> Result<()> {
         let mut file = fs::OpenOptions::new().read(true).write(true).open(path)?;
 
         let mut magic = [0; 4];
         file.read_exact(&mut magic)?;
         if magic != MAGIC {
-            anyhow::bail!("File {} is not a wrapped archive", path.display());
+            anyhow::bail!("Файл {} не является обёрнутым архивом", path.display());
         }
         let mut version = [0; 1];
         file.read_exact(&mut version)?;
         if version[0] != VERSION {
-            anyhow::bail!("Unsupported version");
+            anyhow::bail!("Неподдерживаемая версия формата");
         }
 
         let mut iv_kek = [0; 32];
-        let mut cipher_dek = [0; 48]; // было 32, стало 48
+        let mut cipher_dek = [0; 48];
         let mut iv_data = [0; 32];
         file.read_exact(&mut iv_kek)?;
         file.read_exact(&mut cipher_dek)?;
@@ -105,12 +109,12 @@ impl WrappedKuznechik {
 
         let dek_vec = KuznechikCipher::decrypt_data(&cipher_dek, old_kek, &iv_kek)?;
         let dek: [u8; 32] = dek_vec.as_slice().try_into()
-            .context("DEK length mismatch during rekey")?;
+            .context("Длина DEK при перешифровании не совпадает")?;
 
         let new_iv_kek = KuznechikCipher::generate_iv();
         let new_cipher_dek = KuznechikCipher::encrypt_data(&dek, new_kek, &new_iv_kek)?;
         if new_cipher_dek.len() != 48 {
-            anyhow::bail!("Re‑encrypted DEK length mismatch");
+            anyhow::bail!("Длина перешифрованного DEK не совпадает");
         }
 
         file.seek(SeekFrom::Start(0))?;
@@ -123,6 +127,7 @@ impl WrappedKuznechik {
         Ok(())
     }
 
+    /// Проверяет, является ли файл обёрнутым контейнером KRYB.
     pub fn is_wrapped(path: &Path) -> Result<bool> {
         let mut file = fs::File::open(path)?;
         let mut magic = [0; 4];

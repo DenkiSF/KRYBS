@@ -9,36 +9,36 @@ use serde::Serialize;
 use serde_json::json;
 use crate::backup::BackupResult;
 use crate::storage::BackupInfo;
-
-use log::{info, warn, error}; // для логирования
-
 use crate::source::BackupSource;
 
+use log::{info, warn, error};
+
+/// Точка входа для разбора аргументов командной строки.
 #[derive(Parser)]
 #[command(
     name = "krybs",
-    about = "KRYBS v0.1.0",
-    long_about = "KRYBS v0.1.0\nAutomated backup system with Kuznechik encryption",
+    about = "KRYBS v0.1.0 – автоматизированное резервное копирование с шифрованием Кузнечик",
+    long_about = "Автоматизированная система резервного копирования с шифрованием по ГОСТ Р 34.12-2015 (Кузнечик) и контролем целостности на основе Стрибог (ГОСТ Р 34.11-2012).",
     version = "v0.1.0"
 )]
 pub struct Cli {
-    /// Path to configuration file
+    /// Путь к файлу конфигурации
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
-    /// Backup directory path (overrides config)
+    /// Каталог для хранения резервных копий (переопределяет настройки конфигурации)
     #[arg(long = "backup-dir", global = true)]
     pub backup_dir: Option<PathBuf>,
 
-    /// Profile name (for backup/restore)
+    /// Имя профиля (для команд резервного копирования и восстановления)
     #[arg(long, global = true)]
     pub profile: Option<String>,
 
-    /// Verbose output
+    /// Подробный вывод
     #[arg(short, long, global = true)]
     pub verbose: bool,
 
-    /// JSON output format (not yet implemented)
+    /// Вывод в формате JSON
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -48,353 +48,330 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// Create backup of specified paths or profile
+    /// Создать резервную копию указанных путей или профиля
     ///
-    /// Examples:
+    /// Примеры:
     ///   krybs backup /etc/nginx /var/log/nginx
     ///   krybs backup /home/user --exclude "*.tmp"
     ///   krybs backup --profile postgres --min-interval 24h
     #[command(name = "backup")]
     Backup {
-        /// Source paths to backup (optional if --profile is used)
+        /// Исходные пути для резервного копирования (необязательно, если указан --profile)
         #[arg(required_unless_present = "profile")]
         sources: Vec<PathBuf>,
 
-        /// Exclude patterns (glob syntax)
+        /// Шаблоны исключений (glob)
         #[arg(short, long)]
         exclude: Vec<String>,
 
-        /// Compression level (0-9)
+        /// Уровень сжатия (0-9)
         #[arg(short = 'c', long, default_value = "6")]
         compression: u8,
 
-        /// Skip verification after backup
+        /// Пропустить проверку после создания копии
         #[arg(long)]
         no_verify: bool,
 
-        /// Minimum interval between backups for the same profile (e.g. 24h, 7d)
+        /// Минимальный интервал между резервными копиями для одного профиля (например, 24h, 7d)
         #[arg(long)]
         min_interval: Option<String>,
 
-        /// Force backup even if min-interval is not satisfied
+        /// Принудительно выполнить, даже если интервал не выдержан
         #[arg(short, long)]
         force: bool,
     },
 
-    /// Restore backup to destination
+    /// Восстановить резервную копию в указанный каталог
     ///
-    /// Example: krybs restore full-20260211-123456 /tmp/restore --progress
+    /// Пример: krybs restore full-20260211-123456 /tmp/restore --progress
     #[command(name = "restore")]
     Restore {
-        /// Backup identifier (e.g. full-20260211-123456)
+        /// Идентификатор резервной копии (например, full-20260211-123456)
         #[arg(required = true)]
         backup_id: String,
 
-        /// Destination path where to restore files
+        /// Каталог, куда будет выполнено восстановление
         #[arg(required = true)]
         destination: PathBuf,
 
-        /// Verify restored files (not yet implemented)
+        /// Проверить восстановленные файлы по манифесту
         #[arg(long)]
         verify: bool,
 
-        /// Restore only specific path from backup
+        /// Восстановить только указанный относительный путь из резервной копии
         #[arg(long)]
         path: Option<PathBuf>,
 
-        /// Overwrite existing files
+        /// Перезаписывать существующие файлы
         #[arg(short, long)]
         force: bool,
 
-        /// Show progress bar during extraction
+        /// Показывать индикатор выполнения при распаковке
         #[arg(long)]
         progress: bool,
 
-        /// Skip integrity check before restore
+        /// Пропустить проверку целостности перед восстановлением
         #[arg(long)]
         skip_verify: bool,
     },
 
-    /// List available backups
+    /// Показать список доступных резервных копий
     ///
-    /// Example: krybs list --details --limit 10
+    /// Пример: krybs list --details --limit 10
     #[command(name = "list")]
     List {
-        /// Show detailed information (checksum, profile, etc.)
+        /// Показать подробную информацию (контрольная сумма, профиль и т.д.)
         #[arg(long)]
         details: bool,
 
-        /// Limit number of backups shown
+        /// Ограничить количество выводимых записей
         #[arg(short, long)]
         limit: Option<usize>,
 
-        /// Filter backups by profile name
+        /// Отфильтровать копии по имени профиля
         #[arg(long)]
         profile_filter: Option<String>,
 
-        /// Sort order: asc or desc (default: desc)
+        /// Порядок сортировки: asc (по возрастанию даты) или desc (по убыванию, по умолчанию)
         #[arg(long, value_parser = ["asc", "desc"], default_value = "desc")]
         sort: String,
     },
 
-    /// Show system status and storage information
+    /// Показать состояние системы и хранилища
     ///
-    /// Example: krybs status --check-integrity
+    /// Пример: krybs status --check-integrity
     #[command(name = "status")]
     Status {
-        /// Check integrity of all backups (full verification)
+        /// Проверить целостность всех резервных копий (быстрая проверка)
         #[arg(long)]
         check_integrity: bool,
 
-        /// Show detailed storage usage
+        /// Показать подробную информацию об использовании хранилища
         #[arg(long)]
         storage: bool,
 
-        /// Show recent backup history
+        /// Показать историю последних операций
         #[arg(short = 'H', long)]
         history: bool,
 
-        /// Show only summary (compact output)
+        /// Вывести только сводку (компактный вывод)
         #[arg(short, long)]
         summary: bool,
     },
 
-    /// Verify backup integrity
+    /// Проверить целостность резервных копий
     ///
-    /// Examples:
+    /// Примеры:
     ///   krybs verify full-20260211-123456 --quick
     ///   krybs verify --all --progress
     #[command(name = "verify")]
     Verify {
-        /// Specific backup ID to verify (omit to verify all)
+        /// Идентификатор конкретной копии (если не указан, проверяются все)
         backup_id: Option<String>,
 
-        /// Quick verification (archive integrity and decryption only)
+        /// Быстрая проверка (только структура архива и расшифровка)
         #[arg(short, long)]
         quick: bool,
 
-        /// Attempt to repair corrupted backups (not yet implemented)
+        /// Попытаться восстановить повреждённые копии (пока не реализовано)
         #[arg(long)]
         repair: bool,
 
-        /// Verify only backups of specified profile
+        /// Проверять только копии указанного профиля
         #[arg(long)]
         profile_filter: Option<String>,
 
-        /// Show progress bar during full verification
+        /// Показывать индикатор выполнения при полной проверке
         #[arg(long)]
         progress: bool,
     },
 
-    /// Cleanup old or corrupted backups
+    /// Очистить устаревшие или повреждённые резервные копии
     ///
-    /// Examples:
+    /// Примеры:
     ///   krybs cleanup --keep-last 7 --max-age 30d --dry-run
     ///   krybs cleanup --remove-corrupted --force
     #[command(name = "cleanup")]
     Cleanup {
-        /// Keep only last N backups per profile
+        /// Оставить только последние N копий для каждого профиля
         #[arg(long)]
         keep_last: Option<usize>,
 
-        /// Maximum age (e.g. 7d, 30d, 1y) – only 'd' (days) supported currently
+        /// Максимальный возраст копий (например, 7d, 30d) – поддерживаются дни (d)
         #[arg(long)]
         max_age: Option<String>,
 
-        /// Dry run – show what would be deleted without actually deleting
+        /// Пробный прогон – показать, что будет удалено, без фактического удаления
         #[arg(long)]
         dry_run: bool,
 
-        /// Cleanup only backups of specified profile
+        /// Очищать только копии указанного профиля
         #[arg(long)]
         profile_filter: Option<String>,
 
-        /// Remove corrupted backups (requires verification)
+        /// Удалить повреждённые копии (требуется проверка целостности)
         #[arg(long)]
         remove_corrupted: bool,
 
-        /// Actually perform deletion (required for real cleanup)
+        /// Фактически выполнить удаление (обязательный флаг для реальной очистки)
         #[arg(short = 'f', long)]
         force: bool,
     },
 
-    /// Generate new Kuznechik encryption key
+    /// Сгенерировать новый ключ шифрования Кузнечик (256 бит)
     ///
-    /// Example: krybs keygen --output /etc/krybs/master.key --recovery
+    /// Пример: krybs keygen --output /etc/krybs/master.key --recovery
     #[command(name = "keygen")]
     Keygen {
-        /// Output file path (default: /etc/krybs/master.key)
+        /// Путь для сохранения ключа (по умолчанию /etc/krybs/master.key)
         #[arg(short, long)]
         output: Option<PathBuf>,
 
-        /// Force overwrite existing key
+        /// Перезаписать существующий ключ
         #[arg(long)]
         force: bool,
 
-        /// Also generate a recovery key (stored separately)
+        /// Также сгенерировать ключ восстановления (сохраняется отдельно)
         #[arg(long)]
         recovery: bool,
 
-        /// Optional comment to embed in key file
+        /// Комментарий для встраивания в ключевой файл
         #[arg(long)]
         comment: Option<String>,
     },
 
-    /// Initialize configuration file with defaults or examples
+    /// Инициализировать конфигурационный файл с настройками по умолчанию или примерами
     ///
-    /// Example: krybs init-config --output ~/.config/krybs/config.toml --examples
+    /// Пример: krybs init-config --output ~/.config/krybs/config.toml --examples
     #[command(name = "init-config")]
     InitConfig {
-        /// Interactive mode (ask for settings)
+        /// Интерактивный режим (запрос параметров)
         #[arg(short, long)]
         interactive: bool,
 
-        /// Output configuration file path
+        /// Путь для сохранения файла конфигурации
         #[arg(short, long)]
         output: Option<PathBuf>,
 
-        /// Use default values only (no example profiles)
+        /// Использовать только значения по умолчанию (без примеров профилей)
         #[arg(long)]
         defaults: bool,
 
-        /// Generate example profiles in config
+        /// Добавить примеры профилей в конфигурацию
         #[arg(long)]
         examples: bool,
 
-        /// Explicitly set backup directory in generated config
+        /// Явно задать каталог резервных копий в генерируемой конфигурации
         #[arg(long)]
         set_backup_dir: Option<PathBuf>,
     },
-    /// Backup PostgreSQL database
+
+    /// Создать резервную копию базы данных PostgreSQL
     ///
-    /// Example: krybs backup-postgres --dbname mydb --user postgres
+    /// Пример: krybs backup-postgres --dbname mydb --user postgres
     #[command(name = "backup-postgres")]
     BackupPostgres {
-        /// Database name
+        /// Имя базы данных
         #[arg(short, long)]
         dbname: String,
 
-        /// PostgreSQL host (default: localhost)
+        /// Хост PostgreSQL (по умолчанию localhost)
         #[arg(long, default_value = "localhost")]
         host: String,
 
-        /// PostgreSQL port (default: 5432)
+        /// Порт PostgreSQL (по умолчанию 5432)
         #[arg(long, default_value = "5432")]
         port: u16,
 
-        /// PostgreSQL user
+        /// Пользователь PostgreSQL
         #[arg(short, long)]
         user: String,
 
-        /// Password (if not provided, will try to use .pgpass or environment)
+        /// Пароль (если не указан, будет использован .pgpass или переменная окружения)
         #[arg(short, long)]
         password: Option<String>,
 
-        /// Backup directory (overrides config)
+        /// Каталог для резервной копии (переопределяет настройки конфигурации)
         #[arg(long)]
         backup_dir: Option<PathBuf>,
 
-        /// Profile name for metadata
+        /// Имя профиля для метаданных
         #[arg(long)]
         profile: Option<String>,
 
-        /// Skip verification after backup
+        /// Пропустить проверку после создания копии
         #[arg(long)]
         no_verify: bool,
     },
 
+    /// Создать резервную копию и загрузить в S3-совместимое хранилище
     #[command(name = "backup-s3")]
     BackupS3 {
+        /// Исходные пути
         sources: Vec<PathBuf>,
+
+        /// Шаблоны исключений
         #[arg(short, long)]
         exclude: Vec<String>,
+
+        /// Имя бакета S3
         #[arg(long)]
         bucket: String,
+
+        /// Регион S3 (по умолчанию us-east-1)
         #[arg(long, default_value = "us-east-1")]
         region: String,
+
+        /// URL конечной точки (для совместимых сервисов)
         #[arg(long)]
         endpoint: Option<String>,
+
+        /// Префикс для объектов в бакете
         #[arg(long, default_value = "")]
         prefix: String,
+
+        /// Имя профиля
         #[arg(long)]
         profile: Option<String>,
+
+        /// Пропустить проверку после загрузки
         #[arg(long)]
         no_verify: bool,
     },
 
-    /// Re-encrypt DEK in backups with a new master key (without touching data)
+    /// Перешифровать ключ данных (DEK) существующих копий новым мастер-ключом
     ///
-    /// Example: krybs rekey --old-key /path/to/old.key --new-key /path/to/new.key --backup-id full-20260211-123456
+    /// Пример: krybs rekey --old-key /path/to/old.key --new-key /path/to/new.key --backup-id full-20260211-123456
     #[command(name = "rekey")]
     Rekey {
-        /// Path to the old master key file
+        /// Путь к старому мастер-ключу
         #[arg(long)]
         old_key: PathBuf,
 
-        /// Path to the new master key file
+        /// Путь к новому мастер-ключу
         #[arg(long)]
         new_key: PathBuf,
 
-        /// Specific backup ID to rekey (if omitted, rekey all backups)
+        /// Идентификатор конкретной копии (если не указан, обрабатываются все)
         #[arg(long)]
         backup_id: Option<String>,
 
-        /// Only rekey backups of the given profile
+        /// Обрабатывать только копии указанного профиля
         #[arg(long)]
         profile: Option<String>,
 
-        /// Dry run – show what would be done without actual changes
+        /// Пробный прогон – показать, что будет сделано, без изменений
         #[arg(long)]
         dry_run: bool,
     },
 }
 
-#[derive(Serialize)]
-struct BackupResponse {
-    status: String,
-    backup: BackupResult,
-    compression_ratio: f64,
-    message: String,
-}
-
-#[derive(Serialize)]
-struct ListResponse {
-    status: String,
-    backups: Vec<BackupInfo>,
-    count: usize,
-}
-
-#[derive(Serialize)]
-struct StatusResponse {
-    status: String,
-    config: serde_json::Value,
-    storage: StorageStatsResponse,
-    integrity: Option<IntegrityInfo>,
-    recent_backups: Option<Vec<BackupInfo>>,
-}
-
-#[derive(Serialize)]
-struct StorageStatsResponse {
-    total_backups: usize,
-    total_size: u64,
-    total_size_human: String,
-    profiles: Vec<ProfileCount>,
-}
-
-#[derive(Serialize)]
-struct ProfileCount {
-    name: String,
-    count: usize,
-}
-
-#[derive(Serialize)]
-struct IntegrityInfo {
-    ok: usize,
-    corrupted: usize,
-}
+// ------------------------------------------------------------------------
+// Исполнение команд
+// ------------------------------------------------------------------------
 
 impl Cli {
-    /// Main entry point: dispatch to subcommand
+    /// Точка входа диспетчеризации подкоманд.
     pub fn execute(&self) -> Result<()> {
         match &self.command {
             Commands::Backup {
@@ -468,6 +445,7 @@ impl Cli {
                 examples,
                 set_backup_dir,
             } => self.cmd_init_config(*interactive, output.as_deref(), *defaults, *examples, set_backup_dir.as_deref()),
+
             Commands::BackupPostgres {
                 dbname,
                 host,
@@ -487,6 +465,7 @@ impl Cli {
                 profile.as_deref(),
                 *no_verify,
             ),
+
             Commands::BackupS3 {
                 sources,
                 exclude,
@@ -506,6 +485,7 @@ impl Cli {
                 profile.as_deref(),
                 *no_verify,
             ),
+
             Commands::Rekey {
                 old_key,
                 new_key,
@@ -515,112 +495,9 @@ impl Cli {
             } => self.cmd_rekey(old_key, new_key, backup_id.as_deref(), profile.as_deref(), *dry_run),
         }
     }
-    fn cmd_backup_s3(
-        &self,
-        sources: &[PathBuf],
-        exclude: &[String],
-        bucket: &str,
-        region: &str,
-        endpoint: Option<&str>,
-        prefix: &str,
-        profile_name: Option<&str>,
-        _no_verify: bool,
-    ) -> Result<()> {
-        info!("KRYBS {} command 'backup-s3' called", crate::VERSION);
 
-        let config = crate::config::Config::load(self.config.as_deref()).unwrap_or_default();
-
-        // Создаём временную директорию
-        let temp_dir = tempfile::tempdir()?;
-        let temp_backup_dir = temp_dir.path().join("backup");
-        std::fs::create_dir_all(&temp_backup_dir)?;
-
-        // Создаём временное хранилище (просто папка, не через BackupStorage, так как BackupStorage требует init и т.д.)
-        // Можно использовать обычный BackupStorage с путём temp_backup_dir
-        let storage = crate::storage::BackupStorage::new(temp_backup_dir.to_str().unwrap());
-        storage.init()?;
-
-        let engine = crate::backup::BackupEngine::new(storage, config)?;
-
-        let source = crate::source::file::FileSource::new(sources.to_vec(), exclude.to_vec())?;
-        let sources: Vec<Box<dyn crate::source::BackupSource>> = vec![Box::new(source)];
-
-        let result = tokio::runtime::Runtime::new()?.block_on(
-            engine.create_backup_from_sources(sources, profile_name, self.verbose)
-        )?;
-
-        let backup_path = temp_backup_dir.join(&result.id);
-
-        println!("Connecting to S3...");
-        let uploader = tokio::runtime::Runtime::new()?.block_on(
-            crate::storage::s3_uploader::S3Uploader::new(bucket, region, endpoint)
-        )?;
-
-        println!("Uploading backup to s3://{}/{}{}", bucket, prefix, result.id);
-        uploader.upload_backup(&result.id, &backup_path, prefix)?;
-
-        if self.json {
-            let response = serde_json::json!({
-                "status": "success",
-                "backup_id": result.id,
-                "profile": result.profile,
-                "files": result.file_count,
-                "size": result.archive_size,
-                "size_human": crate::utils::bytes_to_human(result.archive_size),
-                "s3_location": format!("s3://{}/{}{}/", bucket, prefix, result.id),
-            });
-            println!("{}", serde_json::to_string_pretty(&response)?);
-        } else {
-            println!("\n[SUCCESS] Backup uploaded to S3 successfully!");
-            println!("  Backup ID: {}", result.id);
-            println!("  Profile: {}", result.profile);
-            println!("  Files: {}", result.file_count);
-            println!("  Size: {}", crate::utils::bytes_to_human(result.archive_size));
-            println!("  S3 location: s3://{}/{}{}/", bucket, prefix, result.id);
-        }
-
-        Ok(())
-    }
-    
-    fn print_json<T: Serialize>(&self, value: &T) -> Result<()> {
-        if self.json {
-            println!("{}", serde_json::to_string_pretty(value)?);
-        }
-        Ok(())
-    }
-
-    fn print_text(&self, text: &str) {
-        if !self.json {
-            println!("{}", text);
-        }
-    }
-
-    fn check_storage_integrity_summary(
-        &self,
-        storage: &crate::storage::BackupStorage,
-        config: &crate::config::Config,
-    ) -> Result<(usize, usize)> {
-        let backups = storage.list_all()?;
-        let engine = crate::backup::BackupEngine::new(storage.clone(), config.clone())?;
-
-        let mut ok = 0;
-        let mut corrupted = 0;
-
-        for backup in backups {
-            let result = tokio::runtime::Runtime::new()?.block_on(
-                engine.verify_backup(&backup.id, true, false) // quick=true
-            )?;
-            if result.is_ok() {
-                ok += 1;
-            } else {
-                corrupted += 1;
-            }
-        }
-
-        Ok((ok, corrupted))
-    }
     // ------------------------------------------------------------------------
-    // Command implementations
+    // Реализации команд
     // ------------------------------------------------------------------------
 
     fn cmd_backup(
@@ -631,41 +508,28 @@ impl Cli {
         min_interval: &Option<String>,
         force: bool,
     ) -> Result<()> {
-        info!("KRYBS {} command 'backup' called", crate::VERSION);
+        info!("KRYBS {}: команда 'backup' вызвана", crate::VERSION);
 
-        // Load configuration (or defaults)
         let config = crate::config::Config::load(self.config.as_deref()).unwrap_or_default();
+        let backup_dir = self.backup_dir.as_deref().unwrap_or(&config.core.backup_dir);
 
-        // Determine backup directory (CLI overrides config)
-        let backup_dir = self
-            .backup_dir
-            .as_deref()
-            .unwrap_or(&config.core.backup_dir);
-
-        // Create storage and ensure it exists
         let storage = crate::storage::BackupStorage::new(&backup_dir.display().to_string());
         if !backup_dir.exists() {
             storage.init()?;
-            info!("Created backup directory: {}", backup_dir.display());
+            info!("Создан каталог резервных копий: {}", backup_dir.display());
         }
 
-        // Create backup engine
         let engine = crate::backup::BackupEngine::new(storage, config)?;
-        info!("Encryption: {}", engine.encryption_status());
+        info!("Шифрование: {}", engine.encryption_status());
 
-        // Determine paths to back up
+        // Определяем список путей для копирования
         let paths_to_backup = if let Some(profile_name) = &self.profile {
-            // Profile specified: load config again to get paths
             let config = crate::config::Config::load(self.config.as_deref())?;
             if let Some(profile) = config.find_profile(profile_name) {
-                info!(
-                    "Using profile '{}' with {} path(s)",
-                    profile.name,
-                    profile.paths.len()
-                );
+                info!("Использую профиль '{}' с {} путями", profile.name, profile.paths.len());
                 profile.paths.clone()
             } else {
-                warn!("Profile '{}' not found in config", profile_name);
+                warn!("Профиль '{}' не найден в конфигурации", profile_name);
                 sources.to_vec()
             }
         } else {
@@ -674,22 +538,21 @@ impl Cli {
 
         if paths_to_backup.is_empty() {
             return Err(anyhow!(
-                "No paths specified for backup. Use --profile or provide source paths."
+                "Не указаны пути для резервного копирования. Используйте --profile или укажите исходные пути."
             ));
         }
 
-        // --- Backup interval check ---
+        // --- Проверка интервала ---
         if let (Some(profile_name), Some(interval_str)) = (&self.profile, min_interval) {
             let interval = parse_duration(interval_str)
-                .map_err(|_| anyhow!("Invalid duration format. Use e.g. '24h', '7d', '30m'"))?;
+                .map_err(|_| anyhow!("Некорректный формат длительности. Используйте, например, '24h', '7d', '30m'"))?;
 
             match engine.check_backup_interval(profile_name, interval)? {
                 Some(time_left) => {
                     let hours = time_left.num_hours();
                     let minutes = time_left.num_minutes() % 60;
-
                     let msg = format!(
-                        "Last backup for profile '{}' is too recent. Next backup allowed in {}h {}m (minimum interval: {})",
+                        "Последняя копия профиля '{}' создана слишком недавно. Следующая будет доступна через {} ч. {} мин. (минимальный интервал: {})",
                         profile_name, hours, minutes, interval_str
                     );
 
@@ -704,51 +567,47 @@ impl Cli {
                             println!("{}", serde_json::to_string_pretty(&err_json)?);
                         } else {
                             println!("⚠️  {}", msg);
-                            println!("   Use --force to override or wait.");
+                            println!("   Используйте --force для принудительного запуска или дождитесь интервала.");
                         }
                         return Ok(());
                     } else {
                         if !self.json {
-                            println!("   --force detected, proceeding anyway.");
+                            println!("   Обнаружен --force, продолжаем несмотря на интервал.");
                         }
-                        info!("Backup forced despite interval check.");
+                        info!("Принудительный запуск резервного копирования, несмотря на проверку интервала.");
                     }
                 }
-                None => {
-                    // Interval satisfied or no previous backup
-                }
+                None => { /* интервал соблюдён */ }
             }
         }
 
-        // Create source and perform backup
+        // Создание источника и резервной копии
         let source = match crate::source::file::FileSource::new(paths_to_backup, exclude.to_vec()) {
             Ok(src) => src,
             Err(e) => {
-                error!("Failed to create file source: {}", e);
+                error!("Не удалось создать файловый источник: {}", e);
                 return Err(e);
             }
         };
-        let sources: Vec<Box<dyn crate::source::BackupSource>> = vec![Box::new(source)];
+        let sources_list: Vec<Box<dyn BackupSource>> = vec![Box::new(source)];
 
-        let result = tokio::runtime::Runtime::new()?.block_on(engine.create_backup_from_sources(
-            sources,
-            self.profile.as_deref(),
-            self.verbose,
-        ))?;
+        let result = tokio::runtime::Runtime::new()?.block_on(
+            engine.create_backup_from_sources(sources_list, self.profile.as_deref(), self.verbose)
+        )?;
 
-        // Compute compression ratio
+        // Вычисляем степень сжатия/накладных расходов
         let ratio = if result.size_bytes > 0 {
             result.archive_size as f64 / result.size_bytes as f64
         } else {
             0.0
         };
 
-        // JSON output
+        // JSON-вывод
         if self.json {
             #[derive(Serialize)]
             struct BackupResponse {
                 status: String,
-                backup: crate::backup::BackupResult,
+                backup: BackupResult,
                 compression_ratio: f64,
                 message: String,
             }
@@ -756,19 +615,19 @@ impl Cli {
                 status: "success".to_string(),
                 backup: result.clone(),
                 compression_ratio: ratio,
-                message: "Backup created successfully".to_string(),
+                message: "Резервная копия успешно создана".to_string(),
             };
             println!("{}", serde_json::to_string_pretty(&response)?);
             return Ok(());
         }
 
-        // Human-readable output
-        println!("\n[SUCCESS] Backup created successfully!");
-        println!("  Backup ID: {}", result.id);
-        println!("  Profile: {}", result.profile);
-        println!("  Files: {}", result.file_count);
+        // Человекочитаемый вывод
+        println!("\n[УСПЕХ] Резервная копия создана успешно!");
+        println!("  Идентификатор:       {}", result.id);
+        println!("  Профиль:              {}", result.profile);
+        println!("  Количество файлов:    {}", result.file_count);
         println!(
-            "  Size: {} → {}",
+            "  Исходный размер:      {} → архив: {}",
             crate::utils::bytes_to_human(result.size_bytes),
             crate::utils::bytes_to_human(result.archive_size)
         );
@@ -776,41 +635,37 @@ impl Cli {
         if result.size_bytes > 0 {
             if result.archive_size < result.size_bytes {
                 let saved = (1.0 - ratio) * 100.0;
-                println!("  Compression saved: {:.1}%", saved);
+                println!("  Сжатие сэкономило:    {:.1}%", saved);
             } else if result.archive_size > result.size_bytes {
                 let overhead = (ratio - 1.0) * 100.0;
-                println!("  Storage overhead: {:.1}%", overhead);
+                println!("  Накладные расходы:    {:.1}%", overhead);
             } else {
-                println!("  Compression ratio: 1.0");
+                println!("  Коэффициент сжатия:   1.0");
             }
         }
 
         println!(
-            "  Encryption: {}",
-            if result.encrypted {
-                "✓ (Kuznechik GOST R 34.12-2015)"
-            } else {
-                "✗"
-            }
+            "  Шифрование:           {}",
+            if result.encrypted { "✓ (Кузнечик ГОСТ Р 34.12-2015)" } else { "✗" }
         );
-        println!("  Duration: {:.1}s", result.duration_secs);
+        println!("  Длительность:         {:.1} с", result.duration_secs);
 
         let storage = self.storage()?;
-        println!("  Location: {}", storage.backup_path(&result.id).display());
+        println!("  Размещение:           {}", storage.backup_path(&result.id).display());
 
-        // Optional verification after backup (unless disabled)
+        // Дополнительная верификация после создания (если не отключена)
         if !no_verify {
-            println!("\n[INFO] Running quick verification of created backup...");
-            info!("Verifying backup {} after creation", result.id);
+            println!("\n[ИНФО] Выполняю быструю проверку созданной резервной копии...");
+            info!("Проверка копии {} после создания", result.id);
             let verify_result = tokio::runtime::Runtime::new()?.block_on(
-                engine.verify_backup(&result.id, true, false), // quick=true, progress=false
+                engine.verify_backup(&result.id, true, false),
             )?;
             if verify_result.is_ok() {
-                println!("[OK] Backup verified successfully.");
-                info!("Backup {} verified successfully", result.id);
+                println!("[OK] Резервная копия успешно проверена.");
+                info!("Копия {} успешно проверена", result.id);
             } else {
-                warn!("Backup verification reported issues.");
-                eprintln!("[WARN] Backup verification reported issues.");
+                warn!("Проверка резервной копии выявила проблемы.");
+                eprintln!("[ПРЕДУПРЕЖДЕНИЕ] Проверка копии завершилась с ошибками.");
             }
         }
 
@@ -825,9 +680,8 @@ impl Cli {
         profile: Option<&str>,
         dry_run: bool,
     ) -> Result<()> {
-        info!("KRYBS {} command 'rekey' called", crate::VERSION);
+        info!("KRYBS {}: команда 'rekey' вызвана", crate::VERSION);
 
-        // Загружаем старый и новый KEK
         let old_key = *crate::crypto::Crypto::load_key(old_key_path)?;
         let new_key = *crate::crypto::Crypto::load_key(new_key_path)?;
 
@@ -836,11 +690,9 @@ impl Cli {
         let storage = crate::storage::BackupStorage::new(&backup_dir.display().to_string());
 
         let backups = if let Some(id) = backup_id {
-            // Проверяем существование одного бэкапа
             let info = storage.read_backup_info(id)?;
             vec![info]
         } else {
-            // Получаем все бэкапы, возможно с фильтром по профилю
             let mut all = storage.list_all()?;
             if let Some(prof) = profile {
                 all.retain(|b| b.profile == prof);
@@ -849,11 +701,11 @@ impl Cli {
         };
 
         if backups.is_empty() {
-            println!("No backups found to rekey.");
+            println!("Нет резервных копий для обработки.");
             return Ok(());
         }
 
-        println!("Found {} backup(s) to process.", backups.len());
+        println!("Найдено копий для обработки: {}.", backups.len());
         let mut ok_count = 0;
         let mut skipped_count = 0;
         let mut error_count = 0;
@@ -862,7 +714,7 @@ impl Cli {
             let backup_path = storage.backup_path(&backup.id);
             let encrypted_archive = backup_path.join("data.tar.gz.enc");
             if !encrypted_archive.exists() {
-                println!("  Backup {}: encrypted archive not found (maybe unencrypted), skipping.", backup.id);
+                println!("  Копия {}: зашифрованный архив не найден (возможно, не шифрована), пропускаю.", backup.id);
                 skipped_count += 1;
                 continue;
             }
@@ -870,44 +722,44 @@ impl Cli {
             let is_wrapped = match crate::crypto::WrappedKuznechik::is_wrapped(&encrypted_archive) {
                 Ok(w) => w,
                 Err(e) => {
-                    eprintln!("  Backup {}: error checking format - {}", backup.id, e);
+                    eprintln!("  Копия {}: ошибка определения формата - {}", backup.id, e);
                     error_count += 1;
                     continue;
                 }
             };
 
             if !is_wrapped {
-                println!("  Backup {}: old format (plain DEK), skipping. Recreate backup to convert.", backup.id);
+                println!("  Копия {}: старый формат (прямое шифрование), пропускаю. Пересоздайте копию для конвертации.", backup.id);
                 skipped_count += 1;
                 continue;
             }
 
             if dry_run {
-                println!("  [DRY RUN] Would rekey backup: {}", backup.id);
+                println!("  [ПРОБНЫЙ ПРОГОН] Будет перешифрована копия: {}", backup.id);
                 ok_count += 1;
                 continue;
             }
 
-            println!("  Rekeying backup: {} ...", backup.id);
+            println!("  Перешифровываю копию: {} ...", backup.id);
             match crate::crypto::Crypto::rekey_backup(&encrypted_archive, &old_key, &new_key) {
                 Ok(()) => {
-                    println!("    ✓ Successfully rekeyed");
+                    println!("    ✓ Успешно");
                     ok_count += 1;
                 }
                 Err(e) => {
-                    eprintln!("    ✗ Failed: {}", e);
+                    eprintln!("    ✗ Ошибка: {}", e);
                     error_count += 1;
                 }
             }
         }
 
-        println!("\nSummary:");
-        println!("  Successfully rekeyed: {}", ok_count);
-        println!("  Skipped (no need/old format): {}", skipped_count);
-        println!("  Errors: {}", error_count);
+        println!("\nИтого:");
+        println!("  Успешно перешифровано: {}", ok_count);
+        println!("  Пропущено:             {}", skipped_count);
+        println!("  Ошибок:                {}", error_count);
 
         if error_count > 0 {
-            Err(anyhow::anyhow!("Rekey completed with errors"))
+            Err(anyhow::anyhow!("Перешифрование завершено с ошибками"))
         } else {
             Ok(())
         }
@@ -924,28 +776,22 @@ impl Cli {
         profile_name: Option<&str>,
         no_verify: bool,
     ) -> Result<()> {
-        info!("KRYBS {} command 'backup-postgres' called", crate::VERSION);
+        info!("KRYBS {}: команда 'backup-postgres' вызвана", crate::VERSION);
 
-        // Load configuration (or defaults)
         let config = crate::config::Config::load(self.config.as_deref()).unwrap_or_default();
-
-        // Determine backup directory (CLI overrides config)
         let backup_dir = backup_dir
             .or(self.backup_dir.as_deref())
             .unwrap_or(&config.core.backup_dir);
 
-        // Create storage and ensure it exists
         let storage = crate::storage::BackupStorage::new(&backup_dir.display().to_string());
         if !backup_dir.exists() {
             storage.init()?;
-            info!("Created backup directory: {}", backup_dir.display());
+            info!("Создан каталог резервных копий: {}", backup_dir.display());
         }
 
-        // Create backup engine
         let engine = crate::backup::BackupEngine::new(storage, config)?;
-        info!("Encryption: {}", engine.encryption_status());
+        info!("Шифрование: {}", engine.encryption_status());
 
-        // Create Postgres source
         let source = crate::source::postgres::PostgresSource::new(
             dbname.to_string(),
             host.to_string(),
@@ -955,36 +801,92 @@ impl Cli {
         );
         let sources: Vec<Box<dyn BackupSource>> = vec![Box::new(source)];
 
-        // Perform backup
-        let result = tokio::runtime::Runtime::new()?.block_on(engine.create_backup_from_sources(
-            sources,
-            profile_name,
-            self.verbose,
-        ))?;
+        let result = tokio::runtime::Runtime::new()?.block_on(
+            engine.create_backup_from_sources(sources, profile_name, self.verbose)
+        )?;
 
-        println!("\n[SUCCESS] PostgreSQL backup created successfully!");
-        println!("  Backup ID: {}", result.id);
-        println!("  Database: {}", dbname);
-        println!("  Profile: {}", result.profile);
-        println!(
-            "  Size: {}",
-            crate::utils::bytes_to_human(result.archive_size)
-        );
+        println!("\n[УСПЕХ] Резервная копия PostgreSQL создана успешно!");
+        println!("  Идентификатор: {}", result.id);
+        println!("  База данных:   {}", dbname);
+        println!("  Профиль:       {}", result.profile);
+        println!("  Размер:        {}", crate::utils::bytes_to_human(result.archive_size));
 
-        // Optional verification
         if !no_verify {
-            println!("\n[INFO] Running quick verification of created backup...");
-            info!("Verifying backup {} after creation", result.id);
+            println!("\n[ИНФО] Выполняю быструю проверку созданной копии...");
+            info!("Проверка копии {} после создания", result.id);
             let verify_result = tokio::runtime::Runtime::new()?.block_on(
                 engine.verify_backup(&result.id, true, false)
             )?;
             if verify_result.is_ok() {
-                println!("[OK] Backup verified successfully.");
-                info!("Backup {} verified successfully", result.id);
+                println!("[OK] Резервная копия успешно проверена.");
             } else {
-                warn!("Backup verification reported issues.");
-                eprintln!("[WARN] Backup verification reported issues.");
+                warn!("Проверка резервной копии выявила проблемы.");
+                eprintln!("[ПРЕДУПРЕЖДЕНИЕ] Проверка завершилась с ошибками.");
             }
+        }
+
+        Ok(())
+    }
+
+    fn cmd_backup_s3(
+        &self,
+        sources: &[PathBuf],
+        exclude: &[String],
+        bucket: &str,
+        region: &str,
+        endpoint: Option<&str>,
+        prefix: &str,
+        profile_name: Option<&str>,
+        _no_verify: bool,
+    ) -> Result<()> {
+        info!("KRYBS {}: команда 'backup-s3' вызвана", crate::VERSION);
+
+        let config = crate::config::Config::load(self.config.as_deref()).unwrap_or_default();
+
+        let temp_dir = tempfile::tempdir()?;
+        let temp_backup_dir = temp_dir.path().join("backup");
+        std::fs::create_dir_all(&temp_backup_dir)?;
+
+        let storage = crate::storage::BackupStorage::new(temp_backup_dir.to_str().unwrap());
+        storage.init()?;
+
+        let engine = crate::backup::BackupEngine::new(storage, config)?;
+
+        let file_source = crate::source::file::FileSource::new(sources.to_vec(), exclude.to_vec())?;
+        let all_sources: Vec<Box<dyn BackupSource>> = vec![Box::new(file_source)];
+
+        let result = tokio::runtime::Runtime::new()?.block_on(
+            engine.create_backup_from_sources(all_sources, profile_name, self.verbose)
+        )?;
+
+        let backup_path = temp_backup_dir.join(&result.id);
+
+        println!("Подключение к S3...");
+        let uploader = tokio::runtime::Runtime::new()?.block_on(
+            crate::storage::s3_uploader::S3Uploader::new(bucket, region, endpoint)
+        )?;
+
+        println!("Загрузка резервной копии в s3://{}/{}{}", bucket, prefix, result.id);
+        uploader.upload_backup(&result.id, &backup_path, prefix)?;
+
+        if self.json {
+            let response = serde_json::json!({
+                "status": "success",
+                "backup_id": result.id,
+                "profile": result.profile,
+                "files": result.file_count,
+                "size": result.archive_size,
+                "size_human": crate::utils::bytes_to_human(result.archive_size),
+                "s3_location": format!("s3://{}/{}{}/", bucket, prefix, result.id),
+            });
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        } else {
+            println!("\n[УСПЕХ] Резервная копия загружена в S3 успешно!");
+            println!("  Идентификатор:        {}", result.id);
+            println!("  Профиль:               {}", result.profile);
+            println!("  Файлов:                {}", result.file_count);
+            println!("  Размер:                {}", crate::utils::bytes_to_human(result.archive_size));
+            println!("  Размещение S3:         s3://{}/{}{}/", bucket, prefix, result.id);
         }
 
         Ok(())
@@ -1000,93 +902,82 @@ impl Cli {
         progress: bool,
         skip_verify: bool,
     ) -> Result<()> {
-        info!("KRYBS {} command 'restore' called", crate::VERSION);
-        println!(
-            "Restoring backup '{}' to '{}'",
-            backup_id,
-            destination.display()
-        );
+        info!("KRYBS {}: команда 'restore' вызвана", crate::VERSION);
+        println!("Восстановление копии '{}' в '{}'", backup_id, destination.display());
 
         let config = crate::config::Config::load(self.config.as_deref()).unwrap_or_default();
-        let backup_dir = self
-            .backup_dir
-            .as_deref()
-            .unwrap_or(&config.core.backup_dir);
+        let backup_dir = self.backup_dir.as_deref().unwrap_or(&config.core.backup_dir);
 
         let storage = crate::storage::BackupStorage::new(&backup_dir.display().to_string());
         let engine = crate::backup::BackupEngine::new(storage, config)?;
 
-        info!("Encryption: {}", engine.encryption_status());
+        info!("Шифрование: {}", engine.encryption_status());
 
-        // --- Integrity check before restore ---
+        // Проверка целостности перед восстановлением (если не отключена)
         if !skip_verify {
-            println!("[INFO] Running quick integrity check before restore...");
-            info!("Verifying backup {} before restore", backup_id);
+            println!("[ИНФО] Быстрая проверка целостности перед восстановлением...");
+            info!("Проверка копии {} перед восстановлением", backup_id);
 
             let verify_result = tokio::runtime::Runtime::new()?.block_on(
-                engine.verify_backup(backup_id, true, false) // quick=true, progress=false
+                engine.verify_backup(backup_id, true, false)
             )?;
 
             if !verify_result.is_ok() {
-                error!("Backup integrity check failed for {}", backup_id);
-                eprintln!("[ERROR] Backup integrity check failed. Aborting restore.");
+                error!("Проверка целостности не пройдена для {}", backup_id);
+                eprintln!("[ОШИБКА] Проверка целостности не пройдена. Восстановление отменено.");
                 for err in &verify_result.errors {
                     eprintln!("  - {}", err);
                 }
-                return Err(anyhow::anyhow!("Backup verification failed"));
+                return Err(anyhow::anyhow!("Проверка резервной копии не пройдена"));
             }
 
-            println!("[OK] Integrity check passed.");
-            info!("Backup {} verified successfully", backup_id);
+            println!("[OK] Проверка целостности пройдена.");
+            info!("Копия {} успешно проверена", backup_id);
         } else {
-            println!("[INFO] Skipping integrity check as requested.");
-            warn!("Backup integrity check skipped by user for {}", backup_id);
+            println!("[ИНФО] Проверка целостности пропущена по запросу.");
+            warn!("Проверка целостности пропущена пользователем для {}", backup_id);
         }
 
-        // Perform restore
-        tokio::runtime::Runtime::new()?.block_on(engine.restore_backup(
-            backup_id,
-            destination,
-            path,
-            force,
-            progress,
-        ))?;
+        // Выполнение восстановления
+        tokio::runtime::Runtime::new()?.block_on(
+            engine.restore_backup(backup_id, destination, path, force, progress)
+        )?;
 
-        println!("[SUCCESS] Restore completed to {}", destination.display());
-        info!("Restore completed for backup {}", backup_id);
+        println!("[УСПЕХ] Восстановление завершено в {}", destination.display());
+        info!("Восстановление завершено для копии {}", backup_id);
 
-        // --- Optional verification after restore ---
+        // Дополнительная верификация восстановленных файлов
         if verify {
-            println!("\n[INFO] Verifying restored files against manifest...");
+            println!("\n[ИНФО] Проверка восстановленных файлов по манифесту...");
             match engine.verify_restored(backup_id, destination) {
                 Ok(verify_result) => {
                     if verify_result.is_ok() {
-                        println!("[OK] All files verified successfully ({} files matched)", verify_result.files_matched);
+                        println!("[OK] Все файлы успешно проверены ({} совпадений).", verify_result.files_matched);
                     } else {
-                        println!("[WARN] Verification found issues:");
+                        println!("[ПРЕДУПРЕЖДЕНИЕ] Проверка выявила расхождения:");
                         if !verify_result.files_missing.is_empty() {
-                            println!("  Missing files: {}", verify_result.files_missing.len());
+                            println!("  Отсутствует файлов: {}", verify_result.files_missing.len());
                             for f in verify_result.files_missing.iter().take(5) {
                                 println!("    - {}", f);
                             }
                             if verify_result.files_missing.len() > 5 {
-                                println!("    ... and {} more", verify_result.files_missing.len() - 5);
+                                println!("    ... и ещё {}", verify_result.files_missing.len() - 5);
                             }
                         }
                         if !verify_result.files_corrupted.is_empty() {
-                            println!("  Corrupted files: {}", verify_result.files_corrupted.len());
+                            println!("  Повреждённых файлов: {}", verify_result.files_corrupted.len());
                             for f in verify_result.files_corrupted.iter().take(5) {
                                 println!("    - {}", f);
                             }
                             if verify_result.files_corrupted.len() > 5 {
-                                println!("    ... and {} more", verify_result.files_corrupted.len() - 5);
+                                println!("    ... и ещё {}", verify_result.files_corrupted.len() - 5);
                             }
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("[ERROR] Failed to verify restored files: {}", e);
-                    error!("Failed to verify restored files: {}", e);
+                    eprintln!("[ОШИБКА] Не удалось проверить восстановленные файлы: {}", e);
+                    error!("Ошибка проверки восстановленных файлов: {}", e);
                 }
             }
         }
@@ -1101,14 +992,10 @@ impl Cli {
         profile_filter: Option<&str>,
         sort: &str,
     ) -> Result<()> {
-        info!("KRYBS {} command 'list' called", crate::VERSION);
+        info!("KRYBS {}: команда 'list' вызвана", crate::VERSION);
 
         let config = crate::config::Config::load(self.config.as_deref()).unwrap_or_default();
-        let backup_dir = self
-            .backup_dir
-            .as_deref()
-            .unwrap_or(&config.core.backup_dir);
-
+        let backup_dir = self.backup_dir.as_deref().unwrap_or(&config.core.backup_dir);
         let storage = crate::storage::BackupStorage::new(&backup_dir.display().to_string());
 
         if !backup_dir.exists() {
@@ -1117,11 +1004,11 @@ impl Cli {
                     "status": "success",
                     "backups": [],
                     "count": 0,
-                    "message": "Backup directory does not exist"
+                    "message": "Каталог резервных копий не существует"
                 });
                 println!("{}", serde_json::to_string_pretty(&empty)?);
             } else {
-                println!("Backup directory does not exist: {}", backup_dir.display());
+                println!("Каталог резервных копий не существует: {}", backup_dir.display());
             }
             return Ok(());
         }
@@ -1129,7 +1016,7 @@ impl Cli {
         let backups = match storage.list_all() {
             Ok(b) => b,
             Err(e) => {
-                error!("Error listing backups: {}", e);
+                error!("Ошибка получения списка копий: {}", e);
                 if self.json {
                     let err = json!({
                         "status": "error",
@@ -1138,13 +1025,13 @@ impl Cli {
                     });
                     println!("{}", serde_json::to_string_pretty(&err)?);
                 } else {
-                    println!("Error listing backups: {}", e);
+                    println!("Ошибка получения списка резервных копий: {}", e);
                 }
                 return Ok(());
             }
         };
 
-        // Sort (desc by default)
+        // Сортировка (по умолчанию – от новых к старым)
         let mut sorted_backups = backups;
         if sort == "asc" {
             sorted_backups.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
@@ -1152,7 +1039,7 @@ impl Cli {
             sorted_backups.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         }
 
-        // Apply filters and limit
+        // Применяем фильтр и лимит
         let mut filtered = Vec::new();
         for backup in sorted_backups {
             if let Some(filter) = profile_filter {
@@ -1168,12 +1055,12 @@ impl Cli {
             }
         }
 
-        // JSON output
+        // JSON-вывод
         if self.json {
             #[derive(Serialize)]
             struct ListResponse {
                 status: String,
-                backups: Vec<crate::storage::BackupInfo>,
+                backups: Vec<BackupInfo>,
                 count: usize,
             }
             let response = ListResponse {
@@ -1185,13 +1072,13 @@ impl Cli {
             return Ok(());
         }
 
-        // Human-readable output
+        // Человекочитаемый вывод
         if filtered.is_empty() {
-            println!("No backups found.");
+            println!("Резервные копии не найдены.");
             return Ok(());
         }
 
-        println!("Backups ({}):", filtered.len());
+        println!("Резервные копии ({}):", filtered.len());
         for backup in filtered {
             self.display_backup(&backup, details);
         }
@@ -1206,12 +1093,12 @@ impl Cli {
         history: bool,
         summary: bool,
     ) -> Result<()> {
-        info!("KRYBS {} command 'status' called", crate::VERSION);
+        info!("KRYBS {}: команда 'status' вызвана", crate::VERSION);
 
         let config = match crate::config::Config::load(self.config.as_deref()) {
             Ok(c) => c,
             Err(e) => {
-                warn!("Could not load configuration: {}", e);
+                warn!("Не удалось загрузить конфигурацию: {}", e);
                 if self.json {
                     let err = json!({
                         "status": "error",
@@ -1220,24 +1107,20 @@ impl Cli {
                     });
                     println!("{}", serde_json::to_string_pretty(&err)?);
                 } else {
-                    println!("Warning: Could not load configuration: {}", e);
+                    println!("Предупреждение: не удалось загрузить конфигурацию: {}", e);
                 }
-                // Continue with default config for storage stats
                 crate::config::Config::default()
             }
         };
 
-        let backup_dir = self
-            .backup_dir
-            .as_deref()
-            .unwrap_or(&config.core.backup_dir);
+        let backup_dir = self.backup_dir.as_deref().unwrap_or(&config.core.backup_dir);
         let storage = crate::storage::BackupStorage::new(&backup_dir.display().to_string());
 
-        // Gather storage stats
+        // Статистика хранилища
         let stats = match storage.get_storage_stats() {
             Ok(s) => s,
             Err(e) => {
-                error!("Could not get storage stats: {}", e);
+                error!("Не удалось получить статистику хранилища: {}", e);
                 if self.json {
                     let err = json!({
                         "status": "error",
@@ -1246,13 +1129,13 @@ impl Cli {
                     });
                     println!("{}", serde_json::to_string_pretty(&err)?);
                 } else {
-                    println!("Could not get storage stats: {}", e);
+                    println!("Не удалось получить статистику хранилища: {}", e);
                 }
                 return Ok(());
             }
         };
 
-        // Integrity check summary (if requested)
+        // Сводка проверки целостности (если запрошена)
         let integrity_summary = if check_integrity {
             let (ok, corrupted) = self.check_storage_integrity_summary(&storage, &config)?;
             Some((ok, corrupted))
@@ -1260,7 +1143,7 @@ impl Cli {
             None
         };
 
-        // JSON output
+        // JSON-вывод
         if self.json {
             #[derive(Serialize)]
             struct StatusResponse {
@@ -1268,7 +1151,7 @@ impl Cli {
                 config: serde_json::Value,
                 storage: StorageStatsJson,
                 integrity: Option<IntegrityJson>,
-                recent_backups: Option<Vec<crate::storage::BackupInfo>>,
+                recent_backups: Option<Vec<BackupInfo>>,
             }
 
             #[derive(Serialize)]
@@ -1300,16 +1183,13 @@ impl Cli {
             let profiles_vec: Vec<ProfileCount> = stats
                 .profiles
                 .iter()
-                .map(|(name, &count)| ProfileCount {
-                    name: name.clone(),
-                    count,
-                })
+                .map(|(name, &count)| ProfileCount { name: name.clone(), count })
                 .collect();
 
             let recent = if history {
                 let mut all = storage.list_all().unwrap_or_default();
                 all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-                Some(all.into_iter().take(10).collect::<Vec<_>>())
+                Some(all.into_iter().take(10).collect())
             } else {
                 None
             };
@@ -1331,42 +1211,39 @@ impl Cli {
             return Ok(());
         }
 
-        // Human-readable output
+        // Человекочитаемый вывод
         if !summary {
-            println!("Configuration:");
-            println!("  Backup directory: {}", config.core.backup_dir.display());
+            println!("Конфигурация:");
+            println!("  Каталог резервных копий: {}", config.core.backup_dir.display());
 
             let key_exists = config.crypto.master_key_path.exists();
             println!(
-                "  Encryption: {}",
+                "  Шифрование: {}",
                 if key_exists {
-                    format!(
-                        "✓ (Kuznechik GOST R 34.12-2015)\n  Key: {}",
-                        config.crypto.master_key_path.display()
-                    )
+                    format!("✓ (Кузнечик ГОСТ Р 34.12-2015)\n  Ключ: {}", config.crypto.master_key_path.display())
                 } else {
                     "✗".to_string()
                 }
             );
-            println!("  Profiles configured: {}", config.profiles.len());
+            println!("  Профилей в конфигурации: {}", config.profiles.len());
         }
 
         if show_storage || !summary {
-            println!("\nStorage status:");
+            println!("\nСостояние хранилища:");
             print!("{}", stats.display());
         }
 
         if let Some((ok, corrupted)) = integrity_summary {
-            println!("\nIntegrity check summary:");
-            println!("  OK: {}", ok);
-            println!("  Corrupted: {}", corrupted);
+            println!("\nСводка проверки целостности:");
+            println!("  OK:          {}", ok);
+            println!("  Повреждено:  {}", corrupted);
             if corrupted > 0 {
-                println!("  [WARNING] Some backups are corrupted!");
+                println!("  [ВНИМАНИЕ] Обнаружены повреждённые резервные копии!");
             }
         }
 
         if history && !summary {
-            println!("\nRecent backup history:");
+            println!("\nПоследние операции:");
             match storage.list_all() {
                 Ok(backups) => {
                     let mut sorted = backups;
@@ -1383,13 +1260,13 @@ impl Cli {
                         );
                     }
                 }
-                Err(e) => println!("  Could not list backups: {}", e),
+                Err(e) => println!("  Не удалось получить список копий: {}", e),
             }
         }
 
         if summary {
             println!(
-                "Backups: {}, Size: {}",
+                "Копий: {}, Общий размер: {}",
                 stats.total_backups,
                 crate::utils::bytes_to_human(stats.total_size)
             );
@@ -1397,7 +1274,6 @@ impl Cli {
 
         Ok(())
     }
-
 
     fn cmd_verify(
         &self,
@@ -1407,72 +1283,63 @@ impl Cli {
         _profile_filter: Option<&str>,
         progress: bool,
     ) -> Result<()> {
-        info!("KRYBS {} command 'verify' called", crate::VERSION);
+        info!("KRYBS {}: команда 'verify' вызвана", crate::VERSION);
 
         let config = crate::config::Config::load(self.config.as_deref()).unwrap_or_default();
-        let backup_dir = self
-            .backup_dir
-            .as_deref()
-            .unwrap_or(&config.core.backup_dir);
-
+        let backup_dir = self.backup_dir.as_deref().unwrap_or(&config.core.backup_dir);
         let storage = crate::storage::BackupStorage::new(&backup_dir.display().to_string());
         let engine = crate::backup::BackupEngine::new(storage.clone(), config)?;
 
         if let Some(id) = backup_id {
-            // Verify single backup
-            println!("Verifying backup: {} (quick={})", id, quick);
-            info!("Verifying single backup {}", id);
+            println!("Проверка копии: {} (быстрая: {})", id, quick);
+            info!("Проверка копии {}", id);
 
             let result = tokio::runtime::Runtime::new()?.block_on(
                 engine.verify_backup(id, quick, progress)
             )?;
 
             if result.is_ok() {
-                println!("\n✅ [SUCCESS] Backup verification passed");
+                println!("\n✅ [УСПЕХ] Проверка резервной копии пройдена");
                 if !quick {
-                    println!(
-                        "   Files checked: {}/{}",
-                        result.files_matched, result.files_checked
-                    );
+                    println!("   Проверено файлов: {}/{}", result.files_matched, result.files_checked);
                     if !result.files_missing.is_empty() {
-                        println!("   ⚠️  Missing files: {}", result.files_missing.len());
+                        println!("   ⚠️  Отсутствует файлов: {}", result.files_missing.len());
                     }
                     if !result.files_corrupted.is_empty() {
-                        println!("   ❌ Corrupted files: {}", result.files_corrupted.len());
+                        println!("   ❌ Повреждённых файлов: {}", result.files_corrupted.len());
                     }
                 }
-                info!("Backup {} verified OK", id);
+                info!("Копия {} успешно проверена", id);
                 Ok(())
             } else {
-                println!("\n❌ [ERROR] Backup verification failed");
+                println!("\n❌ [ОШИБКА] Проверка не пройдена");
                 for err in &result.errors {
                     println!("   - {}", err);
                 }
                 if !result.files_missing.is_empty() {
-                    println!("\n   Missing files:");
+                    println!("\n   Отсутствующие файлы:");
                     for f in result.files_missing.iter().take(5) {
                         println!("     - {}", f);
                     }
                     if result.files_missing.len() > 5 {
-                        println!("     ... and {} more", result.files_missing.len() - 5);
+                        println!("     ... и ещё {}", result.files_missing.len() - 5);
                     }
                 }
                 if !result.files_corrupted.is_empty() {
-                    println!("\n   Corrupted files:");
+                    println!("\n   Повреждённые файлы:");
                     for f in result.files_corrupted.iter().take(5) {
                         println!("     - {}", f);
                     }
                     if result.files_corrupted.len() > 5 {
-                        println!("     ... and {} more", result.files_corrupted.len() - 5);
+                        println!("     ... и ещё {}", result.files_corrupted.len() - 5);
                     }
                 }
-                error!("Backup {} verification failed", id);
-                Err(anyhow!("Backup verification failed"))
+                error!("Проверка копии {} не пройдена", id);
+                Err(anyhow!("Проверка резервной копии не пройдена"))
             }
         } else {
-            // Verify all backups
-            println!("Verifying all backups...");
-            info!("Verifying all backups");
+            println!("Проверка всех резервных копий...");
+            info!("Проверка всех копий");
 
             let storage = self.storage()?;
             let backups = storage.list_all()?;
@@ -1488,21 +1355,21 @@ impl Cli {
                     println!("OK");
                     ok_count += 1;
                 } else {
-                    println!("FAILED");
+                    println!("ОШИБКА");
                     error_count += 1;
                 }
             }
 
-            println!("\nVerification complete:");
-            println!("  Total: {}", ok_count + error_count);
-            println!("  OK: {}", ok_count);
-            println!("  Failed: {}", error_count);
+            println!("\nПроверка завершена:");
+            println!("  Всего:     {}", ok_count + error_count);
+            println!("  Успешно:   {}", ok_count);
+            println!("  Ошибок:    {}", error_count);
 
             if error_count > 0 {
-                error!("Some backups failed verification");
-                Err(anyhow!("Some backups failed verification"))
+                error!("Некоторые копии не прошли проверку");
+                Err(anyhow!("Некоторые резервные копии не прошли проверку"))
             } else {
-                info!("All backups verified OK");
+                info!("Все копии успешно проверены");
                 Ok(())
             }
         }
@@ -1517,53 +1384,46 @@ impl Cli {
         remove_corrupted: bool,
         force: bool,
     ) -> Result<()> {
-        info!("KRYBS {} command 'cleanup' called", crate::VERSION);
+        info!("KRYBS {}: команда 'cleanup' вызвана", crate::VERSION);
 
         if let Some(keep) = keep_last {
-            println!("Keep last {} backups", keep);
+            println!("Сохранить последних копий: {}", keep);
         }
         if let Some(age) = max_age {
-            println!("Maximum age: {}", age);
+            println!("Максимальный возраст: {}", age);
         }
         if dry_run {
-            println!("[DRY RUN] No changes will be made");
+            println!("[ПРОБНЫЙ ПРОГОН] Изменения не будут применены");
         }
         if let Some(filter) = profile_filter {
-            println!("Profile filter: {}", filter);
+            println!("Фильтр профиля: {}", filter);
         }
         if remove_corrupted {
-            println!("Will remove corrupted backups");
+            println!("Будут удалены повреждённые копии");
         }
         if force {
-            println!("Force mode - no confirmation");
+            println!("Принудительный режим – удаление без подтверждения");
         }
 
         let config = crate::config::Config::load(self.config.as_deref()).unwrap_or_default();
-        let backup_dir = self
-            .backup_dir
-            .as_deref()
-            .unwrap_or(&config.core.backup_dir);
-
+        let backup_dir = self.backup_dir.as_deref().unwrap_or(&config.core.backup_dir);
         let storage = crate::storage::BackupStorage::new(&backup_dir.display().to_string());
 
         let mut backups = storage.list_all()?;
         backups.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        println!("Found {} backups", backups.len());
+        println!("Найдено копий: {}", backups.len());
 
         let mut to_keep = Vec::new();
         let mut to_delete = Vec::new();
 
         let filtered_backups: Vec<_> = if let Some(filter) = profile_filter {
-            backups
-                .into_iter()
-                .filter(|b| b.profile == filter)
-                .collect()
+            backups.into_iter().filter(|b| b.profile == filter).collect()
         } else {
             backups
         };
-        println!("After profile filter: {} backups", filtered_backups.len());
+        println!("После фильтрации профиля: {} копий", filtered_backups.len());
 
-        // Keep last N
+        // Оставить последние N
         if let Some(keep) = keep_last {
             for (i, backup) in filtered_backups.iter().enumerate() {
                 if i < keep {
@@ -1576,7 +1436,7 @@ impl Cli {
             to_keep = filtered_backups.iter().collect();
         }
 
-        // Max age filter
+        // Фильтр по возрасту
         if let Some(age_str) = max_age {
             if age_str.ends_with('d') {
                 if let Ok(days) = age_str.trim_end_matches('d').parse::<i64>() {
@@ -1590,29 +1450,25 @@ impl Cli {
                             to_keep.push(backup);
                         }
                     }
-                    println!(
-                        "Max age filter: {} days (cutoff: {})",
-                        days,
-                        cutoff.format("%Y-%m-%d")
-                    );
+                    println!("Максимальный возраст: {} дн. (дата отсечения: {})", days, cutoff.format("%Y-%m-%d"));
                 }
             } else {
-                warn!("max-age format not supported, use '7d', '30d', etc.");
-                println!("Warning: max-age format not supported, use '7d', '30d', etc.");
+                warn!("Формат max-age не поддерживается, используйте '7d', '30d' и т.д.");
+                println!("Предупреждение: формат max-age не поддерживается, используйте '7d', '30d'.");
             }
         }
 
-        // Remove corrupted backups
+        // Удаление повреждённых
         if remove_corrupted {
-            println!("Checking for corrupted backups...");
+            println!("Проверка на повреждённые копии...");
             let engine = crate::backup::BackupEngine::new(storage.clone(), config.clone())?;
 
             for backup in &filtered_backups {
                 let verify_result = tokio::runtime::Runtime::new()?.block_on(
-                    engine.verify_backup(&backup.id, true, false) // quick=true, progress=false
+                    engine.verify_backup(&backup.id, true, false)
                 )?;
                 if !verify_result.is_ok() {
-                    println!("  Backup {} is corrupted", backup.id);
+                    println!("  Копия {} повреждена", backup.id);
                     if !to_delete.iter().any(|b| b.id == backup.id) {
                         to_delete.push(backup);
                     }
@@ -1620,64 +1476,58 @@ impl Cli {
             }
         }
 
-        // Remove duplicates (a backup can't be both kept and deleted)
+        // Убираем дубли: нельзя одновременно оставить и удалить
         to_delete.retain(|backup| !to_keep.iter().any(|b| b.id == backup.id));
 
-        println!("\nSummary:");
-        println!("  To keep: {} backups", to_keep.len());
-        println!("  To delete: {} backups", to_delete.len());
+        println!("\nИтого:");
+        println!("  Оставить:  {} копий", to_keep.len());
+        println!("  Удалить:   {} копий", to_delete.len());
 
         if !to_delete.is_empty() {
             if dry_run {
-                println!("\n[DRY RUN] Would delete:");
+                println!("\n[ПРОБНЫЙ ПРОГОН] Будет удалено:");
                 for backup in &to_delete {
-                    println!(
-                        "  - {} (profile: {}, date: {})",
+                    println!("  - {} (профиль: {}, дата: {})",
                         backup.id,
                         backup.profile,
                         backup.timestamp.format("%Y-%m-%d")
                     );
                 }
-                println!(
-                    "\nTotal space to free: {}",
+                println!("\nОбщий объём к освобождению: {}",
                     crate::utils::bytes_to_human(to_delete.iter().map(|b| b.size_encrypted).sum())
                 );
             } else if force {
-                println!("\nDeleting backups (force mode)...");
+                println!("\nУдаление копий (принудительный режим)...");
                 let mut freed_space = 0;
                 for backup in &to_delete {
                     let backup_path = storage.backup_path(&backup.id);
                     if backup_path.exists() {
-                        println!("  Deleting: {} (profile: {})", backup.id, backup.profile);
+                        println!("  Удаление: {} (профиль: {})", backup.id, backup.profile);
                         freed_space += backup.size_encrypted;
                         std::fs::remove_dir_all(&backup_path)?;
                     }
                 }
-                println!("\n[SUCCESS] Cleanup completed");
-                println!(
-                    "  Freed space: {}",
-                    crate::utils::bytes_to_human(freed_space)
-                );
-                println!("  Remaining backups: {}", to_keep.len());
+                println!("\n[УСПЕХ] Очистка завершена");
+                println!("  Освобождено:      {}", crate::utils::bytes_to_human(freed_space));
+                println!("  Осталось копий:   {}", to_keep.len());
             } else {
-                println!("\nBackups marked for deletion (use --force to actually delete):");
+                println!("\nКопии, отмеченные для удаления (используйте --force для фактического удаления):");
                 for backup in &to_delete {
                     println!(
-                        "  - {} (profile: {}, date: {}, size: {})",
+                        "  - {} (профиль: {}, дата: {}, размер: {})",
                         backup.id,
                         backup.profile,
                         backup.timestamp.format("%Y-%m-%d"),
                         crate::utils::bytes_to_human(backup.size_encrypted)
                     );
                 }
-                println!(
-                    "\nTotal space to free: {}",
+                println!("\nОбщий объём к освобождению: {}",
                     crate::utils::bytes_to_human(to_delete.iter().map(|b| b.size_encrypted).sum())
                 );
-                println!("\nRun with --force to delete these backups");
+                println!("\nЗапустите с --force для подтверждения удаления.");
             }
         } else {
-            println!("\nNo backups to delete.");
+            println!("\nНет копий для удаления.");
         }
 
         Ok(())
@@ -1690,7 +1540,7 @@ impl Cli {
         recovery: bool,
         comment: Option<&str>,
     ) -> Result<()> {
-        info!("KRYBS {} command 'keygen' called", crate::VERSION);
+        info!("KRYBS {}: команда 'keygen' вызвана", crate::VERSION);
 
         let key = crate::crypto::KuznechikCipher::generate_key();
 
@@ -1699,7 +1549,7 @@ impl Cli {
 
         if output_path.exists() && !force {
             return Err(anyhow!(
-                "Key file already exists: {}. Use --force to overwrite",
+                "Файл ключа уже существует: {}. Используйте --force для перезаписи",
                 output_path.display()
             ));
         }
@@ -1710,22 +1560,22 @@ impl Cli {
 
         crate::crypto::Crypto::save_key(&key, output_path)?;
 
-        println!("[SUCCESS] Generated Kuznechik encryption key (256-bit)");
-        println!("  Key file: {}", output_path.display());
-        println!("  Key size: {} bytes (256 bits)", key.len());
-        println!("  Algorithm: GOST R 34.12-2015 (Kuznechik)");
+        println!("[УСПЕХ] Сгенерирован ключ шифрования Кузнечик (256 бит)");
+        println!("  Файл ключа:     {}", output_path.display());
+        println!("  Размер ключа:   {} байт (256 бит)", key.len());
+        println!("  Алгоритм:       ГОСТ Р 34.12-2015 (Кузнечик)");
 
         if let Some(comment) = comment {
-            println!("  Comment: {}", comment);
+            println!("  Комментарий:    {}", comment);
         }
 
         if recovery {
-            println!("\n[IMPORTANT] Generate recovery key:");
+            println!("\n[ВАЖНО] Генерация ключа восстановления:");
             let recovery_key = crate::crypto::KuznechikCipher::generate_key();
             let recovery_path = output_path.with_extension("recovery.key");
             crate::crypto::Crypto::save_key(&recovery_key, &recovery_path)?;
-            println!("  Recovery key: {}", recovery_path.display());
-            println!("  [WARNING] Store recovery key in a secure location!");
+            println!("  Ключ восстановления: {}", recovery_path.display());
+            println!("  [ПРЕДУПРЕЖДЕНИЕ] Храните ключ восстановления в надёжном месте!");
         }
 
         Ok(())
@@ -1739,147 +1589,91 @@ impl Cli {
         examples: bool,
         set_backup_dir: Option<&Path>,
     ) -> Result<()> {
-        info!("KRYBS {} command 'init-config' called", crate::VERSION);
+        info!("KRYBS {}: команда 'init-config' вызвана", crate::VERSION);
 
         if interactive {
-            println!("Interactive mode enabled");
+            println!("Включён интерактивный режим");
         }
         if let Some(dir) = set_backup_dir {
-            println!("Set backup directory to: {}", dir.display());
+            println!("Задан каталог резервных копий: {}", dir.display());
         }
         if examples {
-            println!("Will generate example profiles");
+            println!("Будут добавлены примеры профилей");
         }
 
-        // Delegate to config module
         crate::config::init_config(output, interactive, defaults)?;
         Ok(())
     }
 
     // ------------------------------------------------------------------------
-    // Helper methods
+    // Вспомогательные методы
     // ------------------------------------------------------------------------
 
-    /// Helper to get a BackupStorage instance using current CLI/config settings
+    /// Возвращает экземпляр хранилища на основе текущих настроек CLI.
     fn storage(&self) -> Result<crate::storage::BackupStorage> {
         let config = crate::config::Config::load(self.config.as_deref()).unwrap_or_default();
-        let backup_dir = self
-            .backup_dir
-            .as_deref()
-            .unwrap_or(&config.core.backup_dir);
-        Ok(crate::storage::BackupStorage::new(
-            &backup_dir.display().to_string(),
-        ))
+        let backup_dir = self.backup_dir.as_deref().unwrap_or(&config.core.backup_dir);
+        Ok(crate::storage::BackupStorage::new(&backup_dir.display().to_string()))
     }
 
-    /// Display a single backup entry (used by `list`)
-    fn display_backup(&self, backup: &crate::storage::BackupInfo, details: bool) {
-        let encryption_status = if backup.encrypted.unwrap_or(false) {
-            "🔒"
-        } else {
-            "🔓"
-        };
+    /// Отображает одну запись резервной копии (для команды list).
+    fn display_backup(&self, backup: &BackupInfo, details: bool) {
+        let enc_icon = if backup.encrypted.unwrap_or(false) { "🔒" } else { "🔓" };
 
         if details {
             println!(
-                "  {} [{}] {} - {} ({} files, {})",
-                encryption_status,
+                "  {} [{}] {} — {} ({} файлов, {})",
+                enc_icon,
                 backup.backup_type,
                 backup.id,
                 backup.timestamp.format("%Y-%m-%d %H:%M:%S"),
                 backup.file_count,
                 crate::utils::bytes_to_human(backup.size_encrypted)
             );
-            println!("    Profile: {}", backup.profile);
+            println!("    Профиль: {}", backup.profile);
             if let Some(checksum) = &backup.checksum {
-                println!("    Checksum: {}...", &checksum[0..16]);
+                println!("    Контрольная сумма: {}...", &checksum[0..16]);
             }
         } else {
             println!(
                 "  {} {} {} {} ({})",
-                encryption_status,
+                enc_icon,
                 backup.backup_type,
                 backup.id,
-                backup
-                    .timestamp
-                    .with_timezone(&chrono::Local)
-                    .format("%Y-%m-%d %H:%M"),
+                backup.timestamp.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M"),
                 crate::utils::bytes_to_human(backup.size_encrypted)
             );
         }
     }
 
-    /// Check integrity of all backups (used by `status --check-integrity`)
-    fn check_storage_integrity(
+    /// Сводная проверка целостности всех копий (возвращает число OK и повреждённых).
+    fn check_storage_integrity_summary(
         &self,
         storage: &crate::storage::BackupStorage,
         config: &crate::config::Config,
-    ) -> Result<()> {
+    ) -> Result<(usize, usize)> {
         let backups = storage.list_all()?;
-        let mut ok_count = 0;
-        let mut error_count = 0;
-
         let engine = crate::backup::BackupEngine::new(storage.clone(), config.clone())?;
 
+        let mut ok = 0;
+        let mut corrupted = 0;
+
         for backup in backups {
-            print!("  Checking {}... ", backup.id);
-            let verify_result = tokio::runtime::Runtime::new()?.block_on(
-                engine.verify_backup(&backup.id, false, false) // quick=false, progress=false
+            let result = tokio::runtime::Runtime::new()?.block_on(
+                engine.verify_backup(&backup.id, true, false)
             )?;
-            if verify_result.is_ok() {
-                println!("OK");
-                ok_count += 1;
+            if result.is_ok() {
+                ok += 1;
             } else {
-                println!("CORRUPT");
-                error_count += 1;
+                corrupted += 1;
             }
         }
 
-        println!(
-            "\nIntegrity check complete: {} OK, {} ERROR",
-            ok_count, error_count
-        );
-
-        if error_count > 0 {
-            println!("[WARNING] Some backups are corrupted!");
-            warn!("Some backups are corrupted");
-        }
-
-        Ok(())
-    }
-
-    /// Show recent backup history (used by `status --history`)
-    fn show_recent_history(&self, config: &crate::config::Config) -> Result<()> {
-        let storage =
-            crate::storage::BackupStorage::new(&config.core.backup_dir.display().to_string());
-
-        let backups = storage.list_all()?;
-        let mut all_backups = backups;
-        all_backups.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-
-        let limit = 10.min(all_backups.len());
-        for backup in all_backups.iter().take(limit) {
-            let encryption_status = if backup.encrypted.unwrap_or(false) {
-                "🔒"
-            } else {
-                "🔓"
-            };
-
-            println!(
-                "  {} {} [{}] {} ({})",
-                backup.timestamp.format("%Y-%m-%d %H:%M"),
-                encryption_status,
-                backup.backup_type,
-                backup.profile,
-                crate::utils::bytes_to_human(backup.size_encrypted)
-            );
-        }
-
-        Ok(())
+        Ok((ok, corrupted))
     }
 }
 
-/// Parse duration string like "24h", "7d", "30m" into chrono::Duration
+/// Преобразует строку вида "24h", "7d", "30m" в chrono::Duration.
 fn parse_duration(s: &str) -> Result<Duration> {
     let s = s.trim();
     if let Some(num_str) = s.strip_suffix('h') {
@@ -1892,7 +1686,7 @@ fn parse_duration(s: &str) -> Result<Duration> {
         let minutes = num_str.parse::<i64>()?;
         Ok(Duration::minutes(minutes))
     } else {
-        // Default to hours if no suffix
+        // По умолчанию считаем часы
         let hours = s.parse::<i64>()?;
         Ok(Duration::hours(hours))
     }

@@ -11,15 +11,16 @@ pub mod utils;
 use anyhow::Result;
 use clap::Parser;
 
+/// Версия приложения
 const VERSION: &str = "v0.1.0";
 
-/// Запускает приложение с аргументами командной строки, полученными из std::env.
+/// Запускает приложение с аргументами командной строки, полученными из `std::env`.
 pub fn run() -> Result<()> {
     let cli = cli::Cli::parse();
     run_with_cli(cli)
 }
 
-/// Запускает приложение с переданным экземпляром Cli (полезно для тестов).
+/// Запускает приложение с переданным экземпляром `Cli` (полезно для тестов).
 pub fn run_with_cli(cli: cli::Cli) -> Result<()> {
     // Загружаем конфигурацию
     let config = config::Config::load(cli.config.as_deref()).unwrap_or_default();
@@ -27,14 +28,14 @@ pub fn run_with_cli(cli: cli::Cli) -> Result<()> {
     // Инициализируем логирование на основе конфигурации
     logging::init_logging(&config.core)?;
 
-    log::info!("KRYBS {} started", VERSION);
-    log::info!("Command: {:?}", cli.command);
+    log::info!("KRYBS {} запущен", VERSION);
+    log::info!("Команда: {:?}", cli.command);
 
     let result = cli.execute();
 
     match &result {
-        Ok(_) => log::info!("Command finished successfully"),
-        Err(e) => log::error!("Command failed: {}", e),
+        Ok(_) => log::info!("Команда успешно завершена"),
+        Err(e) => log::error!("Команда завершилась с ошибкой: {}", e),
     }
 
     result

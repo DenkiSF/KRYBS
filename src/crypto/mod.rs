@@ -12,11 +12,10 @@ pub use kuznechik_cipher::KuznechikCipher;
 pub use wrapped_kuznechik::WrappedKuznechik;
 
 /// Главный криптографический модуль системы.
-/// Использует Envelope Encryption (DEK/KEK). Старый формат (прямое шифрование) также поддерживается.
+/// Использует схему envelope encryption (DEK/KEK).
 #[derive(Debug, Clone)]
 pub struct Crypto {
     wrapped: Option<WrappedKuznechik>,
-    legacy_key: Option<Zeroizing<[u8; 32]>>,
     enabled: bool,
 }
 
@@ -25,7 +24,6 @@ impl Crypto {
     pub fn new_with_key(kek: [u8; 32]) -> Self {
         Self {
             wrapped: Some(WrappedKuznechik::new(kek)),
-            legacy_key: Some(Zeroizing::new(kek)),
             enabled: true,
         }
     }
@@ -34,7 +32,6 @@ impl Crypto {
     pub fn new_without_encryption() -> Self {
         Self {
             wrapped: None,
-            legacy_key: None,
             enabled: false,
         }
     }
@@ -44,7 +41,7 @@ impl Crypto {
         self.enabled && self.wrapped.is_some()
     }
 
-    /// Шифрует файл (всегда в новом формате обёртки).
+    /// Шифрует файл в формате обёртки.
     pub fn encrypt_file(&self, src: &Path, dest: &Path) -> Result<()> {
         if let Some(wrapped) = &self.wrapped {
             wrapped.encrypt_file(src, dest)
@@ -54,21 +51,13 @@ impl Crypto {
         }
     }
 
-    /// Дешифрует файл с автоматическим определением формата (обёртка или legacy).
+    /// Дешифрует файл (только обёрнутый формат).
     pub fn decrypt_file(&self, src: &Path, dest: &Path) -> Result<()> {
         if let Some(wrapped) = &self.wrapped {
-            // Проверяем, является ли файл обёрнутым
-            if WrappedKuznechik::is_wrapped(src)? {
-                return wrapped.decrypt_file(src, dest);
-            } else {
-                // Пробуем расшифровать как старый формат (IV + ciphertext)
-                if let Some(legacy_kek) = &self.legacy_key {
-                    let cipher = KuznechikCipher::new(**legacy_kek);
-                    return cipher.decrypt_file(src, dest);
-                } else {
-                    anyhow::bail!("No legacy key available for old format decryption");
-                }
+            if !WrappedKuznechik::is_wrapped(src)? {
+                anyhow::bail!("Файл не является зашифрованным контейнером KRYB");
             }
+            wrapped.decrypt_file(src, dest)
         } else {
             fs::copy(src, dest)?;
             Ok(())
@@ -83,7 +72,7 @@ impl Crypto {
     /// Сохраняет KEK в файл (бинарный, 32 байта).
     pub fn save_key(key: &[u8; 32], path: &Path) -> Result<()> {
         let mut file = fs::File::create(path)
-            .with_context(|| format!("Failed to create key file: {}", path.display()))?;
+            .with_context(|| format!("Не удалось создать файл ключа: {}", path.display()))?;
         file.write_all(key)?;
         #[cfg(unix)]
         {
@@ -98,11 +87,11 @@ impl Crypto {
     /// Загружает KEK из файла.
     pub fn load_key(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
         let mut file = fs::File::open(path)
-            .with_context(|| format!("Failed to open key file: {}", path.display()))?;
+            .with_context(|| format!("Не удалось открыть файл ключа: {}", path.display()))?;
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)?;
         if buffer.len() != 32 {
-            anyhow::bail!("Invalid key size: expected 32 bytes, got {}", buffer.len());
+            anyhow::bail!("Некорректный размер ключа: ожидалось 32 байта, получено {}", buffer.len());
         }
         let mut key = [0u8; 32];
         key.copy_from_slice(&buffer);
@@ -110,10 +99,10 @@ impl Crypto {
     }
 
     /// Перешифровывает DEK в указанном зашифрованном файле бэкапа.
-    /// Возвращает `true`, если операция выполнена (файл был обёрнут), иначе `false`.
+    /// Возвращает ошибку, если файл не является обёрнутым.
     pub fn rekey_backup(backup_enc_path: &Path, old_key: &[u8; 32], new_key: &[u8; 32]) -> Result<()> {
         if !WrappedKuznechik::is_wrapped(backup_enc_path)? {
-            anyhow::bail!("Backup is not in wrapped format, cannot rekey");
+            anyhow::bail!("Резервная копия не в обёрнутом формате, невозможно перешифровать");
         }
         WrappedKuznechik::reencrypt_dek(old_key, new_key, backup_enc_path)?;
         Ok(())

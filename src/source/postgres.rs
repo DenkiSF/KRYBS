@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 
 use crate::source::BackupSource;
 
+/// Источник данных для резервного копирования базы данных PostgreSQL
 pub struct PostgresSource {
     name: String,
     dbname: String,
@@ -14,10 +15,10 @@ pub struct PostgresSource {
     port: u16,
     user: String,
     password: Option<String>,
-    // можем сохранить размер, если запросим отдельно
 }
 
 impl PostgresSource {
+    /// Создаёт новый источник PostgreSQL
     pub fn new(
         dbname: String,
         host: String,
@@ -36,7 +37,7 @@ impl PostgresSource {
         }
     }
 
-    /// Формирует аргументы для pg_dump
+    /// Формирует аргументы командной строки для утилиты pg_dump
     fn build_pg_dump_args(&self) -> Vec<String> {
         let mut args = vec![
             "-h".to_string(),
@@ -52,7 +53,7 @@ impl PostgresSource {
             "--create".to_string(),       // включить CREATE DATABASE
         ];
 
-        // Формат: plain text (SQL)
+        // Формат вывода: plain text (SQL)
         args.push("-Fp".to_string());
 
         args
@@ -65,7 +66,7 @@ impl BackupSource for PostgresSource {
     }
 
     fn size_hint(&self) -> Option<u64> {
-        None // можно было бы запросить у PostgreSQL, но пока не будем
+        None // размер заранее не известен
     }
 
     fn read(&mut self) -> Result<Box<dyn Read + Send + '_>> {
@@ -74,36 +75,31 @@ impl BackupSource for PostgresSource {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        // Если передан пароль, устанавливаем переменную окружения PGPASSWORD
+        // Если задан пароль, передаём его через переменную окружения
         if let Some(ref pass) = self.password {
             cmd.env("PGPASSWORD", pass);
         }
 
         let mut child = cmd.spawn()
-            .context("Failed to spawn pg_dump")?;
+            .context("Не удалось запустить pg_dump")?;
 
         let stdout = child.stdout.take()
-            .context("Failed to get pg_dump stdout")?;
+            .context("Не удалось получить stdout от pg_dump")?;
 
-        // Нам нужно вернуть Read, но также нужно следить за завершением процесса.
-        // Создадим обёртку, которая при чтении будет также проверять статус процесса.
-        // Для простоты пока прочитаем всё в память (неэффективно для больших баз).
-        // В реальном проекте лучше использовать каналы и потоковую передачу.
-        // Временно сделаем через чтение в буфер.
-
+        // Читаем весь вывод (для простоты – полностью в память)
         let mut output = Vec::new();
         let mut reader = std::io::BufReader::new(stdout);
         reader.read_to_end(&mut output)?;
 
         let status = child.wait()?;
         if !status.success() {
-            // Прочитаем stderr для диагностики
+            // Собираем stderr для диагностики
             let mut stderr = Vec::new();
             if let Some(mut err) = child.stderr {
                 err.read_to_end(&mut stderr)?;
             }
             let error_msg = String::from_utf8_lossy(&stderr);
-            anyhow::bail!("pg_dump failed with exit code {}: {}", status, error_msg);
+            anyhow::bail!("pg_dump завершился с ошибкой (код {}): {}", status, error_msg);
         }
 
         Ok(Box::new(std::io::Cursor::new(output)))
