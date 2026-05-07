@@ -1743,7 +1743,6 @@ dependencies = [
  "hex",
  "hex-literal",
  "indicatif",
- "libgost-rs",
  "log",
  "log4rs",
  "nix",
@@ -1767,14 +1766,6 @@ name = "libc"
 version = "0.2.180"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bcc35a38544a891a5f7c865aca548a982ccb3b8650a5b06d0fd33a10283c56fc"
-
-[[package]]
-name = "libgost-rs"
-version = "0.1.0"
-source = "git+https://github.com/glukozka-dev/libgost-rs.git#0d5fefb5e9c2d58e40997ec48771a53fa6e4ccb1"
-dependencies = [
- "streebog",
-]
 
 [[package]]
 name = "libredox"

@@ -1,19 +1,22 @@
 // src/crypto/wrapped_kuznechik.rs
 
 use anyhow::{Context, Result};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write, Seek, SeekFrom};
 use std::path::Path;
 use zeroize::Zeroizing;
 
-use super::kuznechik_cipher::KuznechikCipher;
+use crate::cipher::core::Kuznechik;
+use rand::rngs::OsRng;
+use rand::RngCore;
 
-/// Магическая сигнатура обёрнутого контейнера
 const MAGIC: [u8; 4] = *b"KRYB";
-/// Версия формата
-const VERSION: u8 = 1;
+const VERSION_MGM: u8 = 2;          // новая версия с MGM
+const IV_LEN: usize = 8;            // синхропосылка 8 байт
+const MAC_LEN: usize = 16;          // имитовставка 128 бит
+const DEK_SIZE: usize = 32;
 
-/// Реализация envelope encryption: ключ данных (DEK) шифруется мастер-ключом (KEK).
+/// Контейнер envelope encryption с MGM-шифрованием.
 #[derive(Debug, Clone)]
 pub struct WrappedKuznechik {
     kek: Zeroizing<[u8; 32]>,
@@ -21,120 +24,158 @@ pub struct WrappedKuznechik {
 
 impl WrappedKuznechik {
     pub fn new(kek: [u8; 32]) -> Self {
-        Self {
-            kek: Zeroizing::new(kek),
-        }
+        Self { kek: Zeroizing::new(kek) }
     }
 
-    /// Шифрует данные и сохраняет в формате KRYB.
+    /// Шифрует открытый файл `src` в обёрнутый контейнер `dest`.
     pub fn encrypt_file(&self, src: &Path, dest: &Path) -> Result<()> {
-        let dek = KuznechikCipher::generate_key();
-        let iv_data = KuznechikCipher::generate_iv();
+        // 1. Генерируем случайный DEK
+        let mut dek = [0u8; DEK_SIZE];
+        OsRng.fill_bytes(&mut dek);
 
+        // 2. Читаем открытые данные
         let plaintext = fs::read(src).context("Не удалось прочитать исходный файл")?;
-        let ciphertext_data = KuznechikCipher::encrypt_data(&plaintext, &dek, &iv_data)?;
 
-        let iv_kek = KuznechikCipher::generate_iv();
-        let cipher_dek = KuznechikCipher::encrypt_data(&dek, &self.kek, &iv_kek)?;
-        if cipher_dek.len() != 48 {
-            anyhow::bail!("Неожиданная длина зашифрованного DEK: {}", cipher_dek.len());
-        }
+        // 3. Шифруем данные на DEK (MGM)
+        let mut iv_data = [0u8; IV_LEN];
+        OsRng.fill_bytes(&mut iv_data);
+        let data_cipher = Kuznechik::new(dek);
+        let (ciphertext_data, mac_data) = data_cipher.encrypt_mgm(&plaintext, b"", &iv_data, 128);
 
-        let mut out = fs::File::create(dest).context("Не удалось создать выходной файл")?;
+        // 4. Шифруем DEK на KEK (MGM)
+        let mut iv_kek = [0u8; IV_LEN];
+        OsRng.fill_bytes(&mut iv_kek);
+        let kek_cipher = Kuznechik::new(*self.kek);
+        let (encrypted_dek, mac_dek) = kek_cipher.encrypt_mgm(&dek, b"", &iv_kek, 128);
+
+        // 5. Записываем контейнер
+        let mut out = File::create(dest).context("Не удалось создать выходной файл")?;
         out.write_all(&MAGIC)?;
-        out.write_all(&[VERSION])?;
+        out.write_all(&[VERSION_MGM])?;
         out.write_all(&iv_kek)?;
-        out.write_all(&cipher_dek)?;
+        out.write_all(&encrypted_dek)?;
+        out.write_all(&mac_dek)?;
         out.write_all(&iv_data)?;
+        out.write_all(&mac_data)?;
         out.write_all(&ciphertext_data)?;
 
         Ok(())
     }
 
-    /// Дешифрует контейнер KRYB.
+    /// Дешифрует обёрнутый контейнер `src` в открытый файл `dest`.
     pub fn decrypt_file(&self, src: &Path, dest: &Path) -> Result<()> {
-        let mut file = fs::File::open(src).context("Не удалось открыть зашифрованный файл")?;
+        let mut file = File::open(src).context("Не удалось открыть зашифрованный файл")?;
 
+        // Читаем и проверяем магию и версию
         let mut magic = [0; 4];
         file.read_exact(&mut magic)?;
         if magic != MAGIC {
-            anyhow::bail!("Не является обёрнутым контейнером Кузнечика (неверная магия)");
+            anyhow::bail!("Не является обёрнутым контейнером (неверная магия)");
         }
         let mut version = [0; 1];
         file.read_exact(&mut version)?;
-        if version[0] != VERSION {
+        if version[0] != VERSION_MGM {
             anyhow::bail!("Неподдерживаемая версия формата {}", version[0]);
         }
 
-        let mut iv_kek = [0; 32];
-        let mut cipher_dek = [0; 48];
-        let mut iv_data = [0; 32];
+        // Читаем заголовок: iv_kek, encrypted_dek, mac_dek, iv_data, mac_data
+        let mut iv_kek = [0u8; IV_LEN];
+        let mut encrypted_dek = [0u8; DEK_SIZE];   // шифротекст DEK ровно 32 байта
+        let mut mac_dek = [0u8; MAC_LEN];
+        let mut iv_data = [0u8; IV_LEN];
+        let mut mac_data = [0u8; MAC_LEN];
+
         file.read_exact(&mut iv_kek)?;
-        file.read_exact(&mut cipher_dek)?;
+        file.read_exact(&mut encrypted_dek)?;
+        file.read_exact(&mut mac_dek)?;
         file.read_exact(&mut iv_data)?;
+        file.read_exact(&mut mac_data)?;
 
-        let dek_vec = KuznechikCipher::decrypt_data(&cipher_dek, &self.kek, &iv_kek)?;
-        let dek: [u8; 32] = dek_vec.as_slice().try_into()
-            .context("Длина DEK после расшифровки не совпадает")?;
+        // Расшифровываем DEK с помощью KEK
+        let kek_cipher = Kuznechik::new(*self.kek);
+        let dek_vec = kek_cipher.decrypt_mgm(&encrypted_dek, b"", &iv_kek, &mac_dek, 128)
+            .map_err(|e| anyhow::anyhow!("Не удалось расшифровать DEK: {}", e))?;
+        let dek: [u8; DEK_SIZE] = dek_vec.as_slice().try_into()
+            .context("Некорректный размер DEK")?;
 
+        // Читаем оставшийся шифротекст данных
         let mut ciphertext_data = Vec::new();
         file.read_to_end(&mut ciphertext_data)?;
 
-        let plaintext = KuznechikCipher::decrypt_data(&ciphertext_data, &dek, &iv_data)?;
+        // Расшифровываем данные
+        let data_cipher = Kuznechik::new(dek);
+        let plaintext = data_cipher.decrypt_mgm(&ciphertext_data, b"", &iv_data, &mac_data, 128)
+            .map_err(|e| anyhow::anyhow!("Не удалось расшифровать данные: {}", e))?;
+
         fs::write(dest, plaintext).context("Не удалось записать расшифрованный файл")?;
         Ok(())
     }
 
-    /// Перешифровывает DEK на месте: расшифровывает старым KEK и зашифровывает новым KEK.
+    /// Быстрая смена KEK: перезаписывает только iv_kek, encrypted_dek и mac_dek в заголовке.
     pub fn reencrypt_dek(old_kek: &[u8; 32], new_kek: &[u8; 32], path: &Path) -> Result<()> {
-        let mut file = fs::OpenOptions::new().read(true).write(true).open(path)?;
+        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
 
         let mut magic = [0; 4];
         file.read_exact(&mut magic)?;
         if magic != MAGIC {
-            anyhow::bail!("Файл {} не является обёрнутым архивом", path.display());
+            anyhow::bail!("Файл не является обёрнутым контейнером");
         }
         let mut version = [0; 1];
         file.read_exact(&mut version)?;
-        if version[0] != VERSION {
-            anyhow::bail!("Неподдерживаемая версия формата");
+        if version[0] != VERSION_MGM {
+            anyhow::bail!("Версия формата {} не поддерживается для перешифрования", version[0]);
         }
 
-        let mut iv_kek = [0; 32];
-        let mut cipher_dek = [0; 48];
-        let mut iv_data = [0; 32];
+        let mut iv_kek = [0u8; IV_LEN];
+        let mut encrypted_dek = [0u8; DEK_SIZE];
+        let mut mac_dek = [0u8; MAC_LEN];
+        // Пропускаем iv_data и mac_data (мы их не меняем)
+        let mut iv_data = [0u8; IV_LEN];
+        let mut mac_data = [0u8; MAC_LEN];
+
         file.read_exact(&mut iv_kek)?;
-        file.read_exact(&mut cipher_dek)?;
+        file.read_exact(&mut encrypted_dek)?;
+        file.read_exact(&mut mac_dek)?;
         file.read_exact(&mut iv_data)?;
+        file.read_exact(&mut mac_data)?;
 
-        let dek_vec = KuznechikCipher::decrypt_data(&cipher_dek, old_kek, &iv_kek)?;
-        let dek: [u8; 32] = dek_vec.as_slice().try_into()
-            .context("Длина DEK при перешифровании не совпадает")?;
+        // Расшифровываем DEK старым KEK
+        let old_cipher = Kuznechik::new(*old_kek);
+        let dek_vec = old_cipher.decrypt_mgm(&encrypted_dek, b"", &iv_kek, &mac_dek, 128)
+            .map_err(|e| anyhow::anyhow!("Не удалось расшифровать DEK старым ключом: {}", e))?;
+        let dek: [u8; DEK_SIZE] = dek_vec.as_slice().try_into()?;
 
-        let new_iv_kek = KuznechikCipher::generate_iv();
-        let new_cipher_dek = KuznechikCipher::encrypt_data(&dek, new_kek, &new_iv_kek)?;
-        if new_cipher_dek.len() != 48 {
-            anyhow::bail!("Длина перешифрованного DEK не совпадает");
-        }
+        // Зашифровываем DEK новым KEK
+        let mut new_iv_kek = [0u8; IV_LEN];
+        OsRng.fill_bytes(&mut new_iv_kek);
+        let new_cipher = Kuznechik::new(*new_kek);
+        let (new_encrypted_dek, new_mac_dek) = new_cipher.encrypt_mgm(&dek, b"", &new_iv_kek, 128);
 
+        // Перезаписываем только iv_kek, encrypted_dek, mac_dek в начале файла
         file.seek(SeekFrom::Start(0))?;
         file.write_all(&MAGIC)?;
-        file.write_all(&[VERSION])?;
+        file.write_all(&[VERSION_MGM])?;
         file.write_all(&new_iv_kek)?;
-        file.write_all(&new_cipher_dek)?;
-        file.write_all(&iv_data)?;
+        file.write_all(&new_encrypted_dek)?;
+        file.write_all(&new_mac_dek)?;
+        // Оставшаяся часть файла (iv_data, mac_data, ciphertext) остаётся без изменений
 
         Ok(())
     }
 
-    /// Проверяет, является ли файл обёрнутым контейнером KRYB.
+    /// Проверяет, является ли файл обёрнутым контейнером KRYB (версии 2).
     pub fn is_wrapped(path: &Path) -> Result<bool> {
-        let mut file = fs::File::open(path)?;
+        let mut file = match File::open(path) {
+            Ok(f) => f,
+            Err(_) => return Ok(false),
+        };
         let mut magic = [0; 4];
         if file.read_exact(&mut magic).is_ok() && magic == MAGIC {
-            Ok(true)
-        } else {
-            Ok(false)
+            let mut version = [0; 1];
+            if file.read_exact(&mut version).is_ok() && version[0] == VERSION_MGM {
+                return Ok(true);
+            }
         }
+        Ok(false)
     }
 }

@@ -28,7 +28,6 @@ dirs = "5.0"
 streebog = "0.10.2"
 once_cell = "1.19"
 tempfile = "3.10"
-libgost-rs = { git = "https://github.com/glukozka-dev/libgost-rs.git" }
 log = "0.4"
 fern = "0.6"
 filetime = "0.2"

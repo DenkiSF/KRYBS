@@ -7,6 +7,7 @@ pub mod logging;
 pub mod storage;
 pub mod source;
 pub mod utils;
+pub mod cipher;
 
 use anyhow::Result;
 use clap::Parser;

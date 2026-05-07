@@ -1542,7 +1542,7 @@ impl Cli {
     ) -> Result<()> {
         info!("KRYBS {}: команда 'keygen' вызвана", crate::VERSION);
 
-        let key = crate::crypto::KuznechikCipher::generate_key();
+        let key = crate::crypto::Crypto::generate_key();
 
         let default_key_path = PathBuf::from("/etc/krybs/master.key");
         let output_path = output.unwrap_or(&default_key_path);
@@ -1571,7 +1571,7 @@ impl Cli {
 
         if recovery {
             println!("\n[ВАЖНО] Генерация ключа восстановления:");
-            let recovery_key = crate::crypto::KuznechikCipher::generate_key();
+            let recovery_key = crate::crypto::Crypto::generate_key();
             let recovery_path = output_path.with_extension("recovery.key");
             crate::crypto::Crypto::save_key(&recovery_key, &recovery_path)?;
             println!("  Ключ восстановления: {}", recovery_path.display());
