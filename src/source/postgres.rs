@@ -48,9 +48,9 @@ impl PostgresSource {
             self.user.clone(),
             "-d".to_string(),
             self.dbname.clone(),
-            "--clean".to_string(),        // добавить команды DROP
-            "--if-exists".to_string(),    // использовать IF EXISTS для DROP
-            "--create".to_string(),       // включить CREATE DATABASE
+            "--clean".to_string(),     // добавить команды DROP
+            "--if-exists".to_string(), // использовать IF EXISTS для DROP
+            "--create".to_string(),    // включить CREATE DATABASE
         ];
 
         // Формат вывода: plain text (SQL)
@@ -80,29 +80,24 @@ impl BackupSource for PostgresSource {
             cmd.env("PGPASSWORD", pass);
         }
 
-        let mut child = cmd.spawn()
-            .context("Не удалось запустить pg_dump")?;
+        let child = cmd.spawn().context("Не удалось запустить pg_dump")?;
 
-        let stdout = child.stdout.take()
-            .context("Не удалось получить stdout от pg_dump")?;
+        // wait_with_output читает stdout и stderr одновременно через внутренние треды,
+        // исключая дедлок при переполнении буфера stderr (~64 КБ).
+        let result = child
+            .wait_with_output()
+            .context("Не удалось дождаться завершения pg_dump")?;
 
-        // Читаем весь вывод (для простоты – полностью в память)
-        let mut output = Vec::new();
-        let mut reader = std::io::BufReader::new(stdout);
-        reader.read_to_end(&mut output)?;
-
-        let status = child.wait()?;
-        if !status.success() {
-            // Собираем stderr для диагностики
-            let mut stderr = Vec::new();
-            if let Some(mut err) = child.stderr {
-                err.read_to_end(&mut stderr)?;
-            }
-            let error_msg = String::from_utf8_lossy(&stderr);
-            anyhow::bail!("pg_dump завершился с ошибкой (код {}): {}", status, error_msg);
+        if !result.status.success() {
+            let error_msg = String::from_utf8_lossy(&result.stderr);
+            anyhow::bail!(
+                "pg_dump завершился с ошибкой (код {}): {}",
+                result.status,
+                error_msg
+            );
         }
 
-        Ok(Box::new(std::io::Cursor::new(output)))
+        Ok(Box::new(std::io::Cursor::new(result.stdout)))
     }
 
     fn metadata(&self) -> Value {

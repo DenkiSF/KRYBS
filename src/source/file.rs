@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use flate2::write::GzEncoder;
+use log::debug;
 use serde_json::Value;
 use std::fs;
 use std::io::Read;
@@ -63,7 +64,10 @@ impl FileSource {
     }
 
     /// Рекурсивно сканирует указанные пути, собирает информацию о файлах (исключая те, что подпадают под шаблоны)
-    fn scan_paths(paths: &[PathBuf], exclude_patterns: &[String]) -> Result<(Vec<FileInfo>, u64, PathBuf)> {
+    fn scan_paths(
+        paths: &[PathBuf],
+        exclude_patterns: &[String],
+    ) -> Result<(Vec<FileInfo>, u64, PathBuf)> {
         let mut files = Vec::new();
         let mut total_size = 0;
 
@@ -129,8 +133,12 @@ impl FileSource {
         let is_symlink = file_type.is_symlink();
 
         let (size, hash, symlink_target) = if is_symlink {
-            let target = fs::read_link(path)
-                .with_context(|| format!("Не удалось прочитать цель символьной ссылки: {}", path.display()))?;
+            let target = fs::read_link(path).with_context(|| {
+                format!(
+                    "Не удалось прочитать цель символьной ссылки: {}",
+                    path.display()
+                )
+            })?;
             (0, String::new(), Some(target))
         } else if file_type.is_file() {
             let size = metadata.len();
@@ -173,13 +181,19 @@ impl FileSource {
 
     /// Создаёт TAR.GZ архив из отсканированных файлов и сохраняет его во временный файл
     fn create_archive(&mut self) -> Result<()> {
-        println!("ОТЛАДКА: Начинаю создание архива");
+        debug!("Начинаю создание архива");
 
         if !self.common_root.exists() {
-            return Err(anyhow::anyhow!("Общий корневой каталог не существует: {:?}", self.common_root));
+            return Err(anyhow::anyhow!(
+                "Общий корневой каталог не существует: {:?}",
+                self.common_root
+            ));
         }
         if !self.common_root.is_dir() {
-            return Err(anyhow::anyhow!("Общий корневой каталог не является директорией: {:?}", self.common_root));
+            return Err(anyhow::anyhow!(
+                "Общий корневой каталог не является директорией: {:?}",
+                self.common_root
+            ));
         }
 
         let temp_file = NamedTempFile::new()?;
@@ -191,17 +205,20 @@ impl FileSource {
 
         for (idx, file_info) in self.files.iter().enumerate() {
             if !file_info.path.exists() {
-                println!("ОТЛАДКА[{}]: файл не существует, пропускаю", idx);
+                debug!("[{}]: файл не существует, пропускаю", idx);
                 continue;
             }
 
-            let rel_path = file_info.path.strip_prefix(&self.common_root).with_context(|| {
-                format!(
-                    "Не удалось получить относительный путь для {} (корень: {})",
-                    file_info.path.display(),
-                    self.common_root.display()
-                )
-            })?;
+            let rel_path = file_info
+                .path
+                .strip_prefix(&self.common_root)
+                .with_context(|| {
+                    format!(
+                        "Не удалось получить относительный путь для {} (корень: {})",
+                        file_info.path.display(),
+                        self.common_root.display()
+                    )
+                })?;
 
             let mut header = tar::Header::new_gnu();
             header.set_mtime(file_info.mtime.timestamp() as u64);
@@ -223,31 +240,42 @@ impl FileSource {
                     header.set_entry_type(tar::EntryType::Symlink);
                     header.set_size(0);
                     header.set_cksum();
-                    tar_builder.append_link(&mut header, rel_path, target)
+                    tar_builder
+                        .append_link(&mut header, rel_path, target)
                         .context("Не удалось добавить символьную ссылку")?;
                 } else {
-                    eprintln!("[ПРЕДУПРЕЖДЕНИЕ] Символьная ссылка {} не имеет цели, пропускаю", file_info.path.display());
+                    eprintln!(
+                        "[ПРЕДУПРЕЖДЕНИЕ] Символьная ссылка {} не имеет цели, пропускаю",
+                        file_info.path.display()
+                    );
                     continue;
                 }
             } else {
-                let _metadata = fs::metadata(&file_info.path)
-                    .context(format!("Не удалось прочитать метаданные для {}", file_info.path.display()))?;
+                let _metadata = fs::metadata(&file_info.path).context(format!(
+                    "Не удалось прочитать метаданные для {}",
+                    file_info.path.display()
+                ))?;
 
-                let mut src_file = fs::File::open(&file_info.path)
-                    .context(format!("Не удалось открыть файл: {}", file_info.path.display()))?;
+                let mut src_file = fs::File::open(&file_info.path).context(format!(
+                    "Не удалось открыть файл: {}",
+                    file_info.path.display()
+                ))?;
 
                 header.set_size(file_info.size);
                 header.set_entry_type(tar::EntryType::Regular);
                 header.set_cksum();
 
-                tar_builder.append_data(&mut header, rel_path, &mut src_file)
+                tar_builder
+                    .append_data(&mut header, rel_path, &mut src_file)
                     .context("Не удалось добавить файл в архив")?;
             }
         }
 
-        let encoder = tar_builder.into_inner()
+        let encoder = tar_builder
+            .into_inner()
             .context("Не удалось завершить построение архива")?;
-        encoder.finish()
+        encoder
+            .finish()
             .context("Не удалось завершить сжатие архива")?;
 
         self.temp_archive = Some(temp_file);

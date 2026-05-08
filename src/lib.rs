@@ -1,13 +1,13 @@
 // src/lib.rs
 pub mod backup;
+pub mod cipher;
 pub mod cli;
 pub mod config;
 pub mod crypto;
 pub mod logging;
-pub mod storage;
 pub mod source;
+pub mod storage;
 pub mod utils;
-pub mod cipher;
 
 use anyhow::Result;
 use clap::Parser;

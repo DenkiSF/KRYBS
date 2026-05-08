@@ -1,8 +1,8 @@
 // src/crypto/mod.rs
 
 use anyhow::{Context, Result};
-use rand::rngs::OsRng;
 use rand::RngCore;
+use rand::rngs::OsRng;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -70,8 +70,7 @@ impl Crypto {
                 .context("Не удалось создать родительский каталог для ключа")?;
         }
 
-        let mut file = File::create(path)
-            .context("Не удалось создать файл ключа")?;
+        let mut file = File::create(path).context("Не удалось создать файл ключа")?;
 
         #[cfg(unix)]
         {
@@ -81,24 +80,29 @@ impl Crypto {
             file.set_permissions(perms)?;
         }
 
-        file.write_all(key)
-            .context("Не удалось записать ключ")?;
+        file.write_all(key).context("Не удалось записать ключ")?;
         Ok(())
     }
 
     /// Загружает ключ из файла (ожидается ровно 32 байта).
     pub fn load_key(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
         let mut key_bytes = [0u8; 32];
-        let mut file = File::open(path)
-            .context("Не удалось открыть файл ключа")?;
+        let mut file = File::open(path).context("Не удалось открыть файл ключа")?;
 
-        let n = file.read(&mut key_bytes)
+        let n = file
+            .read(&mut key_bytes)
             .context("Не удалось прочитать ключ")?;
         if n != 32 {
-            anyhow::bail!(
-                "Файл ключа содержит {} байт, ожидалось 32",
-                n
-            );
+            anyhow::bail!("Файл ключа содержит {} байт, ожидалось 32", n);
+        }
+
+        let mut extra = [0u8; 1];
+        if file
+            .read(&mut extra)
+            .context("Не удалось проверить размер файла ключа")?
+            != 0
+        {
+            anyhow::bail!("Файл ключа длиннее 32 байт — возможно, указан неверный файл");
         }
 
         Ok(Zeroizing::new(key_bytes))

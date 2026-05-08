@@ -2,8 +2,8 @@
 
 use anyhow::{Context, Result};
 use aws_config::meta::region::RegionProviderChain;
-use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
+use aws_sdk_s3::primitives::ByteStream;
 use std::path::Path;
 use walkdir::WalkDir;
 
@@ -16,11 +16,10 @@ pub struct S3Uploader {
 impl S3Uploader {
     /// Создаёт новый экземпляр, настраивая подключение к указанному бакету
     pub async fn new(bucket: &str, region: &str, endpoint: Option<&str>) -> Result<Self> {
-        let region_provider = RegionProviderChain::first_try(
-            aws_sdk_s3::config::Region::new(region.to_string())
-        )
-        .or_default_provider()
-        .or_else(aws_sdk_s3::config::Region::new("us-east-1"));
+        let region_provider =
+            RegionProviderChain::first_try(aws_sdk_s3::config::Region::new(region.to_string()))
+                .or_default_provider()
+                .or_else(aws_sdk_s3::config::Region::new("us-east-1"));
 
         let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .region(region_provider)
@@ -44,7 +43,10 @@ impl S3Uploader {
     /// Загружает резервную копию (все файлы из локального каталога) в S3
     pub fn upload_backup(&self, backup_id: &str, local_dir: &Path, prefix: &str) -> Result<()> {
         if !local_dir.exists() {
-            anyhow::bail!("Локальный каталог резервной копии не существует: {}", local_dir.display());
+            anyhow::bail!(
+                "Локальный каталог резервной копии не существует: {}",
+                local_dir.display()
+            );
         }
 
         let prefix = if prefix.is_empty() {
@@ -53,19 +55,21 @@ impl S3Uploader {
             format!("{}/{}/", prefix.trim_end_matches('/'), backup_id)
         };
 
+        let rt = tokio::runtime::Runtime::new()
+            .context("Не удалось создать Tokio runtime для S3-загрузки")?;
+
         for entry in WalkDir::new(local_dir)
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
         {
             let local_path = entry.path();
-            let relative = local_path.strip_prefix(local_dir)
+            let relative = local_path
+                .strip_prefix(local_dir)
                 .expect("должен быть внутри корня");
             let object_key = format!("{}{}", prefix, relative.display());
 
-            tokio::runtime::Runtime::new()?.block_on(
-                self.upload_file(local_path, &object_key)
-            )?;
+            rt.block_on(self.upload_file(local_path, &object_key))?;
 
             println!("  Загружен: {}", object_key);
         }

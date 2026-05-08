@@ -2,12 +2,38 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::utils; // для bytes_to_human и human_to_bytes
+use crate::utils;
+
+/// Десериализует `size_encrypted` из u64 (новый формат) или строки вида "1.23 GB" (старый формат).
+fn deserialize_size_encrypted<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    struct SizeVisitor;
+    impl<'de> de::Visitor<'de> for SizeVisitor {
+        type Value = u64;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(
+                f,
+                "число байт (u64) или строка размера, например \"1.23 GB\""
+            )
+        }
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<u64, E> {
+            Ok(v)
+        }
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<u64, E> {
+            Ok(v as u64)
+        }
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<u64, E> {
+            utils::human_to_bytes(v)
+                .ok_or_else(|| de::Error::custom(format!("Неверный формат размера: {}", v)))
+        }
+    }
+    d.deserialize_any(SizeVisitor)
+}
 
 pub mod s3_uploader;
 
@@ -34,8 +60,8 @@ pub struct BackupInfo {
     pub timestamp: DateTime<Utc>,
     pub profile: String,
     pub file_count: u64,
-    pub size_encrypted: u64,            // размер в байтах
-    pub checksum: Option<String>,       // хеш (Стрибог) зашифрованного архива
+    pub size_encrypted: u64,      // размер в байтах
+    pub checksum: Option<String>, // хеш (Стрибог) зашифрованного архива
     pub encrypted: Option<bool>,
 }
 
@@ -47,7 +73,8 @@ pub struct LocalIndex {
     pub timestamp: DateTime<Utc>,
     pub profile: String,
     pub file_count: u64,
-    pub size_encrypted: String,         // человекочитаемый размер
+    #[serde(deserialize_with = "deserialize_size_encrypted")]
+    pub size_encrypted: u64, // точный размер в байтах
     pub encrypted: Option<bool>,
     pub checksum: Option<String>,
 }
@@ -60,7 +87,7 @@ impl From<&BackupInfo> for LocalIndex {
             timestamp: info.timestamp,
             profile: info.profile.clone(),
             file_count: info.file_count,
-            size_encrypted: utils::bytes_to_human(info.size_encrypted),
+            size_encrypted: info.size_encrypted,
             encrypted: info.encrypted,
             checksum: info.checksum.clone(),
         }
@@ -133,8 +160,8 @@ impl BackupStorage {
         let index = LocalIndex::from(info);
         let index_path = backup_path.join("index-local.json");
 
-        let content = serde_json::to_string_pretty(&index)
-            .context("Не удалось сериализовать индекс")?;
+        let content =
+            serde_json::to_string_pretty(&index).context("Не удалось сериализовать индекс")?;
 
         fs::write(&index_path, content)
             .with_context(|| format!("Не удалось записать индекс в {}", index_path.display()))?;
@@ -150,8 +177,6 @@ impl BackupStorage {
     /// Читает полную информацию о резервной копии из индекса
     pub fn read_backup_info(&self, id: &str) -> Result<BackupInfo> {
         let local_index = self.read_local_index(id)?;
-        // Преобразуем человекочитаемый размер обратно в байты
-        let size_bytes = utils::human_to_bytes(&local_index.size_encrypted).unwrap_or(0);
 
         Ok(BackupInfo {
             id: local_index.backup_id,
@@ -159,7 +184,7 @@ impl BackupStorage {
             timestamp: local_index.timestamp,
             profile: local_index.profile,
             file_count: local_index.file_count,
-            size_encrypted: size_bytes,
+            size_encrypted: local_index.size_encrypted,
             checksum: local_index.checksum.clone(),
             encrypted: local_index.encrypted,
         })
@@ -173,7 +198,8 @@ impl BackupStorage {
             return Ok(backups);
         }
 
-        for entry in fs::read_dir(dir).context("Не удалось прочитать каталог резервных копий")? {
+        for entry in fs::read_dir(dir).context("Не удалось прочитать каталог резервных копий")?
+        {
             let entry = entry.context("Не удалось прочитать запись каталога")?;
             let path = entry.path();
 
@@ -187,7 +213,10 @@ impl BackupStorage {
                 match self.read_backup_info(&backup_id) {
                     Ok(info) => backups.push(info),
                     Err(e) => {
-                        eprintln!("Предупреждение: не удалось прочитать информацию о копии {}: {}", backup_id, e);
+                        eprintln!(
+                            "Предупреждение: не удалось прочитать информацию о копии {}: {}",
+                            backup_id, e
+                        );
                     }
                 }
             }

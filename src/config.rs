@@ -1,5 +1,6 @@
 // src/config.rs
 use anyhow::{Context, Result};
+use log::info;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -60,22 +61,6 @@ pub struct CryptoConfig {
     /// Удалять незашифрованные файлы после шифрования
     #[serde(default = "default_delete_plain")]
     pub delete_plain: bool,
-
-    /// Размер блока для потокового шифрования (байты)
-    #[serde(default = "default_chunk_size")]
-    pub chunk_size: usize,
-
-    /// Режим шифрования (на данный момент поддерживается CBC)
-    #[serde(default = "default_cipher_mode")]
-    pub cipher_mode: String,
-
-    /// Использовать ли функцию формирования ключа (KDF) для усиления ключа
-    #[serde(default = "default_use_kdf")]
-    pub use_kdf: bool,
-
-    /// Размер соли для KDF (байты)
-    #[serde(default = "default_salt_size")]
-    pub salt_size: usize,
 }
 
 fn default_master_key_path() -> PathBuf {
@@ -84,22 +69,6 @@ fn default_master_key_path() -> PathBuf {
 
 fn default_delete_plain() -> bool {
     true
-}
-
-fn default_chunk_size() -> usize {
-    1024 * 1024 // 1 МБ
-}
-
-fn default_cipher_mode() -> String {
-    "CBC".to_string()
-}
-
-fn default_use_kdf() -> bool {
-    true
-}
-
-fn default_salt_size() -> usize {
-    32
 }
 
 /// Основная конфигурация
@@ -257,10 +226,6 @@ impl Default for CryptoConfig {
         Self {
             master_key_path: default_master_key_path(),
             delete_plain: default_delete_plain(),
-            chunk_size: default_chunk_size(),
-            cipher_mode: default_cipher_mode(),
-            use_kdf: default_use_kdf(),
-            salt_size: default_salt_size(),
         }
     }
 }
@@ -307,7 +272,7 @@ impl Config {
 
         for path in paths {
             if path.exists() {
-                println!("Загрузка конфигурации из: {}", path.display());
+                info!("Загрузка конфигурации из: {}", path.display());
                 return Self::load_from_file(&path);
             }
         }
@@ -366,15 +331,6 @@ impl Config {
             )));
         }
 
-        // Проверка допустимого режима шифрования
-        let valid_modes = ["CBC", "CTR", "OFB", "CFB"];
-        if !valid_modes.contains(&self.crypto.cipher_mode.as_str()) {
-            return Err(ConfigError::Invalid(format!(
-                "Недопустимый режим шифрования: {}. Допустимые значения: {:?}",
-                self.crypto.cipher_mode, valid_modes
-            )));
-        }
-
         // Проверка уровня сжатия профилей
         for profile in &self.profiles {
             if profile.compression > 9 {
@@ -412,7 +368,7 @@ impl Config {
                 ));
             }
         }
-        
+
         if self.core.max_log_files == 0 {
             return Err(ConfigError::Invalid(
                 "max_log_files должен быть больше 0".to_string(),
@@ -447,14 +403,6 @@ impl Config {
         info.insert(
             "master_key_path".to_string(),
             self.crypto.master_key_path.display().to_string(),
-        );
-        info.insert(
-            "cipher_mode".to_string(),
-            self.crypto.cipher_mode.clone(),
-        );
-        info.insert(
-            "use_kdf".to_string(),
-            self.crypto.use_kdf.to_string(),
         );
         info.insert(
             "profiles_count".to_string(),
@@ -521,14 +469,16 @@ fn get_config_paths(custom_path: Option<&Path>) -> Vec<PathBuf> {
 }
 
 /// Инициализирует конфигурационный файл с настройками по умолчанию или примерами
-pub fn init_config(output_path: Option<&Path>, interactive: bool, defaults: bool) -> Result<()> {
+pub fn init_config(
+    output_path: Option<&Path>,
+    interactive: bool,
+    defaults: bool,
+    examples: bool,
+) -> Result<()> {
     let mut config = Config::default();
 
-    if defaults {
-        // Используем только значения по умолчанию
-        config.profiles = Vec::new();
-    } else {
-        // Добавляем примеры профилей
+    if examples && !defaults {
+        // Добавляем примеры профилей только если явно запрошено и не режим defaults
         config.profiles = vec![
             Profile {
                 name: "postgres".to_string(),
@@ -579,20 +529,38 @@ pub fn init_config(output_path: Option<&Path>, interactive: bool, defaults: bool
 
     println!("Создание файла конфигурации: {}", save_path.display());
     println!("Параметры конфигурации:");
-    println!("  Каталог резервных копий: {}", config.core.backup_dir.display());
-    println!("  Временный каталог:       {}", config.core.temp_dir.display());
-    println!("  Путь к мастер-ключу:     {}", config.crypto.master_key_path.display());
+    println!(
+        "  Каталог резервных копий: {}",
+        config.core.backup_dir.display()
+    );
+    println!(
+        "  Временный каталог:       {}",
+        config.core.temp_dir.display()
+    );
+    println!(
+        "  Путь к мастер-ключу:     {}",
+        config.crypto.master_key_path.display()
+    );
     println!("  Удалять открытые копии:  {}", config.crypto.delete_plain);
-    println!("  Режим шифрования:        {}", config.crypto.cipher_mode);
-    println!("  Использовать KDF:        {}", config.crypto.use_kdf);
-    println!("  Макс. возраст копий:     {} дн.", config.maintenance.max_age_days);
-    println!("  Макс. количество копий:  {}", config.maintenance.max_backups);
-    
+    println!(
+        "  Макс. возраст копий:     {} дн.",
+        config.maintenance.max_age_days
+    );
+    println!(
+        "  Макс. количество копий:  {}",
+        config.maintenance.max_backups
+    );
+
     if !config.profiles.is_empty() {
         println!("  Примеры профилей ({}):", config.profiles.len());
         for profile in &config.profiles {
-            println!("    - {} ({} путей, шифрование: {}, сжатие: {})", 
-                profile.name, profile.paths.len(), profile.encrypt, profile.compression);
+            println!(
+                "    - {} ({} путей, шифрование: {}, сжатие: {})",
+                profile.name,
+                profile.paths.len(),
+                profile.encrypt,
+                profile.compression
+            );
         }
     }
 
@@ -615,11 +583,11 @@ pub fn init_config(output_path: Option<&Path>, interactive: bool, defaults: bool
     if let Some(parent) = save_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    
+
     if let Some(key_parent) = config.crypto.master_key_path.parent() {
         fs::create_dir_all(key_parent)?;
     }
-    
+
     fs::create_dir_all(&config.core.backup_dir)?;
     fs::create_dir_all(&config.core.temp_dir)?;
 
@@ -630,14 +598,22 @@ pub fn init_config(output_path: Option<&Path>, interactive: bool, defaults: bool
 
     println!("\n[УСПЕХ] Конфигурация успешно сохранена!");
     println!("  Файл конфигурации:          {}", save_path.display());
-    println!("  Каталог резервных копий:    {}", config.core.backup_dir.display());
-    println!("  Временный каталог:          {}", config.core.temp_dir.display());
+    println!(
+        "  Каталог резервных копий:    {}",
+        config.core.backup_dir.display()
+    );
+    println!(
+        "  Временный каталог:          {}",
+        config.core.temp_dir.display()
+    );
     println!("\n[ВАЖНО] Дальнейшие шаги:");
-    println!("  1. Сгенерируйте ключ шифрования: krybs keygen --output {}", 
-             config.crypto.master_key_path.display());
+    println!(
+        "  1. Сгенерируйте ключ шифрования: krybs keygen --output {}",
+        config.crypto.master_key_path.display()
+    );
     println!("  2. Протестируйте резервное копирование: krybs backup --profile system-logs");
     println!("  3. Проверьте состояние: krybs status");
-    
+
     if !config.profiles.is_empty() {
         println!("\nДоступные профили:");
         for profile in &config.profiles {
