@@ -16,10 +16,7 @@ fn deserialize_size_encrypted<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D:
     impl<'de> de::Visitor<'de> for SizeVisitor {
         type Value = u64;
         fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            write!(
-                f,
-                "число байт (u64) или строка размера, например \"1.23 GB\""
-            )
+            write!(f, "число байт (u64) или строка размера, например \"1.23 GB\"")
         }
         fn visit_u64<E: de::Error>(self, v: u64) -> Result<u64, E> {
             Ok(v)
@@ -28,8 +25,7 @@ fn deserialize_size_encrypted<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D:
             Ok(v as u64)
         }
         fn visit_str<E: de::Error>(self, v: &str) -> Result<u64, E> {
-            utils::human_to_bytes(v)
-                .ok_or_else(|| de::Error::custom(format!("Неверный формат размера: {}", v)))
+            utils::human_to_bytes(v).ok_or_else(|| de::Error::custom(format!("Неверный формат размера: {}", v)))
         }
     }
     d.deserialize_any(SizeVisitor)
@@ -109,15 +105,12 @@ pub struct BackupStorage {
 impl BackupStorage {
     /// Создаёт новое хранилище по указанному корневому пути
     pub fn new(root: &str) -> Self {
-        Self {
-            backup_dir: PathBuf::from(root),
-        }
+        Self { backup_dir: PathBuf::from(root) }
     }
 
     /// Инициализирует структуру каталогов (создаёт корневую папку, если её нет)
     pub fn init(&self) -> Result<()> {
-        fs::create_dir_all(&self.backup_dir)
-            .context("Не удалось создать каталог резервных копий")?;
+        fs::create_dir_all(&self.backup_dir).context("Не удалось создать каталог резервных копий")?;
         Ok(())
     }
 
@@ -129,11 +122,7 @@ impl BackupStorage {
     /// Возвращает время последней резервной копии для указанного профиля
     pub fn last_backup_time_for_profile(&self, profile: &str) -> Result<Option<DateTime<Utc>>> {
         let backups = self.list_all()?;
-        let last = backups
-            .into_iter()
-            .filter(|b| b.profile == profile)
-            .max_by_key(|b| b.timestamp)
-            .map(|b| b.timestamp);
+        let last = backups.into_iter().filter(|b| b.profile == profile).max_by_key(|b| b.timestamp).map(|b| b.timestamp);
         Ok(last)
     }
 
@@ -142,11 +131,9 @@ impl BackupStorage {
         let backup_path = self.backup_path(id);
         let index_path = backup_path.join("index-local.json");
 
-        let content = fs::read_to_string(&index_path)
-            .with_context(|| format!("Не удалось прочитать индекс для копии {}", id))?;
+        let content = fs::read_to_string(&index_path).with_context(|| format!("Не удалось прочитать индекс для копии {}", id))?;
 
-        let index: LocalIndex = serde_json::from_str(&content)
-            .with_context(|| format!("Не удалось разобрать индекс для копии {}", id))?;
+        let index: LocalIndex = serde_json::from_str(&content).with_context(|| format!("Не удалось разобрать индекс для копии {}", id))?;
 
         Ok(index)
     }
@@ -154,17 +141,14 @@ impl BackupStorage {
     /// Записывает локальный индекс резервной копии
     pub fn write_local_index(&self, info: &BackupInfo) -> Result<()> {
         let backup_path = self.backup_path(&info.id);
-        fs::create_dir_all(&backup_path)
-            .with_context(|| format!("Не удалось создать каталог для копии {}", info.id))?;
+        fs::create_dir_all(&backup_path).with_context(|| format!("Не удалось создать каталог для копии {}", info.id))?;
 
         let index = LocalIndex::from(info);
         let index_path = backup_path.join("index-local.json");
 
-        let content =
-            serde_json::to_string_pretty(&index).context("Не удалось сериализовать индекс")?;
+        let content = serde_json::to_string_pretty(&index).context("Не удалось сериализовать индекс")?;
 
-        fs::write(&index_path, content)
-            .with_context(|| format!("Не удалось записать индекс в {}", index_path.display()))?;
+        fs::write(&index_path, content).with_context(|| format!("Не удалось записать индекс в {}", index_path.display()))?;
 
         Ok(())
     }
@@ -198,25 +182,17 @@ impl BackupStorage {
             return Ok(backups);
         }
 
-        for entry in fs::read_dir(dir).context("Не удалось прочитать каталог резервных копий")?
-        {
+        for entry in fs::read_dir(dir).context("Не удалось прочитать каталог резервных копий")? {
             let entry = entry.context("Не удалось прочитать запись каталога")?;
             let path = entry.path();
 
             if path.is_dir() {
-                let backup_id = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
+                let backup_id = path.file_name().and_then(|n| n.to_str()).map(|s| s.to_string()).unwrap_or_default();
 
                 match self.read_backup_info(&backup_id) {
                     Ok(info) => backups.push(info),
                     Err(e) => {
-                        eprintln!(
-                            "Предупреждение: не удалось прочитать информацию о копии {}: {}",
-                            backup_id, e
-                        );
+                        eprintln!("Предупреждение: не удалось прочитать информацию о копии {}: {}", backup_id, e);
                     }
                 }
             }
@@ -269,10 +245,7 @@ impl StorageStats {
         let mut output = String::new();
 
         output.push_str(&format!("Всего копий: {}\n", self.total_backups));
-        output.push_str(&format!(
-            "Общий размер: {}\n",
-            utils::bytes_to_human(self.total_size)
-        ));
+        output.push_str(&format!("Общий размер: {}\n", utils::bytes_to_human(self.total_size)));
 
         if !self.profiles.is_empty() {
             output.push_str("Копий по профилям:\n");

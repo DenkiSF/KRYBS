@@ -30,9 +30,7 @@ pub struct WrappedKuznechik {
 
 impl WrappedKuznechik {
     pub fn new(kek: [u8; 32]) -> Self {
-        Self {
-            kek: Zeroizing::new(kek),
-        }
+        Self { kek: Zeroizing::new(kek) }
     }
 
     /// Шифрует открытый файл `src` в обёрнутый контейнер `dest`.
@@ -64,11 +62,7 @@ impl WrappedKuznechik {
 
         loop {
             let mut chunk = Vec::with_capacity(CHUNK_SIZE);
-            reader
-                .by_ref()
-                .take(CHUNK_SIZE as u64)
-                .read_to_end(&mut chunk)
-                .context("Ошибка чтения исходного файла")?;
+            reader.by_ref().take(CHUNK_SIZE as u64).read_to_end(&mut chunk).context("Ошибка чтения исходного файла")?;
             if chunk.is_empty() {
                 break;
             }
@@ -83,16 +77,14 @@ impl WrappedKuznechik {
             out.write_all(&ciphertext)?;
         }
 
-        out.flush()
-            .context("Не удалось завершить запись выходного файла")?;
+        out.flush().context("Не удалось завершить запись выходного файла")?;
         Ok(())
     }
 
     /// Дешифрует обёрнутый контейнер `src` в открытый файл `dest`.
     /// Поддерживает VERSION_MGM (2) и VERSION_CHUNK (3).
     pub fn decrypt_file(&self, src: &Path, dest: &Path) -> Result<()> {
-        let mut file =
-            BufReader::new(File::open(src).context("Не удалось открыть зашифрованный файл")?);
+        let mut file = BufReader::new(File::open(src).context("Не удалось открыть зашифрованный файл")?);
 
         // Читаем и проверяем магию и версию
         let mut magic = [0u8; 4];
@@ -119,10 +111,7 @@ impl WrappedKuznechik {
         let dek_vec = kek_cipher
             .decrypt_mgm(&encrypted_dek, b"", &iv_kek, &mac_dek, 128)
             .map_err(|e| anyhow::anyhow!("Не удалось расшифровать DEK: {}", e))?;
-        let dek: [u8; DEK_SIZE] = dek_vec
-            .as_slice()
-            .try_into()
-            .context("Некорректный размер DEK")?;
+        let dek: [u8; DEK_SIZE] = dek_vec.as_slice().try_into().context("Некорректный размер DEK")?;
         let data_cipher = Kuznechik::new(dek);
 
         let out_file = File::create(dest).context("Не удалось создать выходной файл")?;
@@ -166,8 +155,7 @@ impl WrappedKuznechik {
             }
         }
 
-        out.flush()
-            .context("Не удалось завершить запись расшифрованного файла")?;
+        out.flush().context("Не удалось завершить запись расшифрованного файла")?;
         Ok(())
     }
 
@@ -185,10 +173,7 @@ impl WrappedKuznechik {
         let mut version = [0u8; 1];
         file.read_exact(&mut version)?;
         if version[0] != VERSION_MGM && version[0] != VERSION_CHUNK {
-            anyhow::bail!(
-                "Версия формата {} не поддерживается для перешифрования",
-                version[0]
-            );
+            anyhow::bail!("Версия формата {} не поддерживается для перешифрования", version[0]);
         }
 
         let mut iv_kek = [0u8; IV_LEN];
@@ -215,8 +200,7 @@ impl WrappedKuznechik {
         // 4. Пишем новый заголовок + данные во временный файл
         let tmp_path = path.with_extension("rekey.tmp");
         let write_result: Result<()> = (|| {
-            let tmp_file = File::create(&tmp_path)
-                .context("Не удалось создать временный файл для перешифрования")?;
+            let tmp_file = File::create(&tmp_path).context("Не удалось создать временный файл для перешифрования")?;
             let mut out = BufWriter::new(tmp_file);
             out.write_all(&MAGIC)?;
             out.write_all(&[version[0]])?;
@@ -225,8 +209,7 @@ impl WrappedKuznechik {
             out.write_all(&new_mac_dek)?;
             // Копируем данные (чанки/шифротекст) из оригинала
             let mut reader = BufReader::new(file);
-            io::copy(&mut reader, &mut out)
-                .context("Ошибка копирования данных во временный файл")?;
+            io::copy(&mut reader, &mut out).context("Ошибка копирования данных во временный файл")?;
             out.flush()?;
             Ok(())
         })();
@@ -254,9 +237,7 @@ impl WrappedKuznechik {
         let mut magic = [0u8; 4];
         if file.read_exact(&mut magic).is_ok() && magic == MAGIC {
             let mut version = [0u8; 1];
-            if file.read_exact(&mut version).is_ok()
-                && (version[0] == VERSION_MGM || version[0] == VERSION_CHUNK)
-            {
+            if file.read_exact(&mut version).is_ok() && (version[0] == VERSION_MGM || version[0] == VERSION_CHUNK) {
                 return Ok(true);
             }
         }

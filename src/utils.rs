@@ -15,8 +15,7 @@ pub fn build_globset(patterns: &[String]) -> Result<Option<GlobSet>> {
 
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
-        let glob =
-            Glob::new(pattern).with_context(|| format!("Некорректный glob-шаблон: {}", pattern))?;
+        let glob = Glob::new(pattern).with_context(|| format!("Некорректный glob-шаблон: {}", pattern))?;
         builder.add(glob);
     }
 
@@ -25,12 +24,7 @@ pub fn build_globset(patterns: &[String]) -> Result<Option<GlobSet>> {
 
 /// Синхронное вычисление хеша файла по ГОСТ 34.11-2018 (Стрибог, 256 бит).
 pub fn calculate_file_hash(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path).with_context(|| {
-        format!(
-            "Не удалось открыть файл для хеширования: {}",
-            path.display()
-        )
-    })?;
+    let mut file = fs::File::open(path).with_context(|| format!("Не удалось открыть файл для хеширования: {}", path.display()))?;
 
     let mut hasher = Streebog256::new();
     let mut buffer = [0; 8192];
@@ -100,13 +94,7 @@ pub fn bytes_to_human(bytes: u64) -> String {
 /// Преобразует человекочитаемый размер обратно в байты (например, "1.5 MB" -> 1572864).
 pub fn human_to_bytes(human: &str) -> Option<u64> {
     let human = human.trim().to_lowercase();
-    let units = [
-        ("tb", 1024u64.pow(4)),
-        ("gb", 1024u64.pow(3)),
-        ("mb", 1024u64.pow(2)),
-        ("kb", 1024u64),
-        ("b", 1),
-    ];
+    let units = [("tb", 1024u64.pow(4)), ("gb", 1024u64.pow(3)), ("mb", 1024u64.pow(2)), ("kb", 1024u64), ("b", 1)];
 
     for (unit, multiplier) in units {
         if human.ends_with(unit) {

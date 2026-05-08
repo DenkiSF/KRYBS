@@ -66,8 +66,7 @@ impl Crypto {
     /// Сохраняет ключ в бинарный файл (с правами 0o600 на Unix).
     pub fn save_key(key: &[u8; 32], path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .context("Не удалось создать родительский каталог для ключа")?;
+            fs::create_dir_all(parent).context("Не удалось создать родительский каталог для ключа")?;
         }
 
         let mut file = File::create(path).context("Не удалось создать файл ключа")?;
@@ -89,19 +88,13 @@ impl Crypto {
         let mut key_bytes = [0u8; 32];
         let mut file = File::open(path).context("Не удалось открыть файл ключа")?;
 
-        let n = file
-            .read(&mut key_bytes)
-            .context("Не удалось прочитать ключ")?;
+        let n = file.read(&mut key_bytes).context("Не удалось прочитать ключ")?;
         if n != 32 {
             anyhow::bail!("Файл ключа содержит {} байт, ожидалось 32", n);
         }
 
         let mut extra = [0u8; 1];
-        if file
-            .read(&mut extra)
-            .context("Не удалось проверить размер файла ключа")?
-            != 0
-        {
+        if file.read(&mut extra).context("Не удалось проверить размер файла ключа")? != 0 {
             anyhow::bail!("Файл ключа длиннее 32 байт — возможно, указан неверный файл");
         }
 
@@ -112,11 +105,7 @@ impl Crypto {
 
     /// Меняет мастер‑ключ для существующего контейнера (быстрая замена KEK).
     /// Перезаписывает только заголовок с зашифрованным DEK, не трогая данные.
-    pub fn rekey_backup(
-        encrypted_path: &Path,
-        old_key: &[u8; 32],
-        new_key: &[u8; 32],
-    ) -> Result<()> {
+    pub fn rekey_backup(encrypted_path: &Path, old_key: &[u8; 32], new_key: &[u8; 32]) -> Result<()> {
         WrappedKuznechik::reencrypt_dek(old_key, new_key, encrypted_path)
     }
 }

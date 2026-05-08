@@ -23,9 +23,7 @@ pub struct Kuznechik {
 
 impl Kuznechik {
     pub fn new(key: [u8; KEY_SIZE]) -> Self {
-        Self {
-            keys: Keys::new(key),
-        }
+        Self { keys: Keys::new(key) }
     }
 
     #[inline(always)]
@@ -40,11 +38,7 @@ impl Kuznechik {
     /// Шифрует два независимых блока за один проход, интерливируя раунды.
     /// CPU может выполнять оба потока параллельно через ILP.
     #[inline(always)]
-    fn encrypt_raw_pair(
-        &self,
-        mut a: [u8; BLOCK_SIZE],
-        mut b: [u8; BLOCK_SIZE],
-    ) -> ([u8; BLOCK_SIZE], [u8; BLOCK_SIZE]) {
+    fn encrypt_raw_pair(&self, mut a: [u8; BLOCK_SIZE], mut b: [u8; BLOCK_SIZE]) -> ([u8; BLOCK_SIZE], [u8; BLOCK_SIZE]) {
         for round in 1..=9 {
             let k = self.keys.get_round_key(round);
             a = x_transform(a, k);
@@ -78,13 +72,7 @@ impl Kuznechik {
     /// Аутентифицированное шифрование в режиме MGM.
     /// iv — синхропосылка длиной от 1 до 16 байт (16 байт соответствует c=n=128).
     /// mac_len_bits — длина имитовставки (32..128, кратная 8).
-    pub fn encrypt_mgm(
-        &self,
-        plaintext: &[u8],
-        aad: &[u8],
-        iv: &[u8],
-        mac_len_bits: usize,
-    ) -> (Vec<u8>, Vec<u8>) {
+    pub fn encrypt_mgm(&self, plaintext: &[u8], aad: &[u8], iv: &[u8], mac_len_bits: usize) -> (Vec<u8>, Vec<u8>) {
         assert!(iv.len() >= 1 && iv.len() <= BLOCK_SIZE);
         assert!(mac_len_bits >= 32 && mac_len_bits <= 128 && mac_len_bits % 8 == 0);
 
@@ -163,14 +151,7 @@ impl Kuznechik {
     }
 
     /// Аутентифицированное расшифрование в режиме MGM.
-    pub fn decrypt_mgm(
-        &self,
-        ciphertext: &[u8],
-        aad: &[u8],
-        iv: &[u8],
-        mac: &[u8],
-        mac_len_bits: usize,
-    ) -> Result<Vec<u8>, &'static str> {
+    pub fn decrypt_mgm(&self, ciphertext: &[u8], aad: &[u8], iv: &[u8], mac: &[u8], mac_len_bits: usize) -> Result<Vec<u8>, &'static str> {
         assert!(iv.len() >= 1 && iv.len() <= BLOCK_SIZE);
         assert!(mac_len_bits >= 32 && mac_len_bits <= 128 && mac_len_bits % 8 == 0);
 
@@ -257,48 +238,33 @@ mod tests {
     #[test]
     fn test_encrypt_block() {
         let key = [
-            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-            0x66, 0x77, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10, 0x01, 0x23, 0x45, 0x67,
+            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10, 0x01, 0x23, 0x45, 0x67,
             0x89, 0xab, 0xcd, 0xef,
         ];
         let cipher = Kuznechik::new(key);
-        let mut plaintext = Block::new([
-            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x00, 0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa,
-            0x99, 0x88,
-        ]);
+        let mut plaintext = Block::new([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x00, 0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88]);
         let ciphertext = cipher.encrypt_block(&mut plaintext);
-        let expected = [
-            0x7f, 0x67, 0x9d, 0x90, 0xbe, 0xbc, 0x24, 0x30, 0x5a, 0x46, 0x8d, 0x42, 0xb9, 0xd4,
-            0xed, 0xcd,
-        ];
+        let expected = [0x7f, 0x67, 0x9d, 0x90, 0xbe, 0xbc, 0x24, 0x30, 0x5a, 0x46, 0x8d, 0x42, 0xb9, 0xd4, 0xed, 0xcd];
         assert_eq!(ciphertext, expected);
     }
 
     #[test]
     fn test_decrypt_block() {
         let key = [
-            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-            0x66, 0x77, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10, 0x01, 0x23, 0x45, 0x67,
+            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10, 0x01, 0x23, 0x45, 0x67,
             0x89, 0xab, 0xcd, 0xef,
         ];
         let cipher = Kuznechik::new(key);
-        let mut ct_block = Block::new([
-            0x7f, 0x67, 0x9d, 0x90, 0xbe, 0xbc, 0x24, 0x30, 0x5a, 0x46, 0x8d, 0x42, 0xb9, 0xd4,
-            0xed, 0xcd,
-        ]);
+        let mut ct_block = Block::new([0x7f, 0x67, 0x9d, 0x90, 0xbe, 0xbc, 0x24, 0x30, 0x5a, 0x46, 0x8d, 0x42, 0xb9, 0xd4, 0xed, 0xcd]);
         let plaintext = cipher.decrypt_block(&mut ct_block);
-        let expected = [
-            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x00, 0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa,
-            0x99, 0x88,
-        ];
+        let expected = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x00, 0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88];
         assert_eq!(plaintext, expected);
     }
 
     #[test]
     fn test_mgm_roundtrip() {
         let key = [
-            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-            0x66, 0x77, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10, 0x01, 0x23, 0x45, 0x67,
+            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10, 0x01, 0x23, 0x45, 0x67,
             0x89, 0xab, 0xcd, 0xef,
         ];
         let cipher = Kuznechik::new(key);
@@ -319,8 +285,7 @@ mod tests {
     #[test]
     fn test_mgm_wrong_mac_fails() {
         let key = [
-            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-            0x66, 0x77, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10, 0x01, 0x23, 0x45, 0x67,
+            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10, 0x01, 0x23, 0x45, 0x67,
             0x89, 0xab, 0xcd, 0xef,
         ];
         let cipher = Kuznechik::new(key);
@@ -340,33 +305,23 @@ mod tests {
     #[test]
     fn test_mgm_official_vector() {
         let key = [
-            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-            0x66, 0x77, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10, 0x01, 0x23, 0x45, 0x67,
+            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10, 0x01, 0x23, 0x45, 0x67,
             0x89, 0xab, 0xcd, 0xef,
         ];
         let cipher = Kuznechik::new(key);
 
-        let iv: [u8; 16] = hex::decode("1122334455667700ffeeddccbbaa9988")
-            .unwrap()
-            .try_into()
-            .unwrap();
+        let iv: [u8; 16] = hex::decode("1122334455667700ffeeddccbbaa9988").unwrap().try_into().unwrap();
 
         // Проверяем Y1 и Z1 (уже было)
         let mut y1_blk = Block::new(iv);
         let y1 = cipher.encrypt_block(&mut y1_blk);
-        assert_eq!(
-            y1.to_vec(),
-            hex::decode("7f679d90bebc24305a468d42b9d4edcd").unwrap()
-        );
+        assert_eq!(y1.to_vec(), hex::decode("7f679d90bebc24305a468d42b9d4edcd").unwrap());
 
         let mut z1_iv = iv;
         z1_iv[0] |= 0x80;
         let mut z1_blk = Block::new(z1_iv);
         let z1 = cipher.encrypt_block(&mut z1_blk);
-        assert_eq!(
-            z1.to_vec(),
-            hex::decode("7fc245a8586e6602a7bbdb2786bdc66f").unwrap()
-        );
+        assert_eq!(z1.to_vec(), hex::decode("7fc245a8586e6602a7bbdb2786bdc66f").unwrap());
 
         // Эталонные H_i (уже проверены ранее, здесь не дублируем)
 
@@ -376,7 +331,7 @@ mod tests {
                             04040404040404040303030303030303\
                             ea0505050505050505",
         )
-        .unwrap();
+            .unwrap();
         let plaintext = hex::decode(
             "1122334455667700ffeeddccbbaa9988\
                                     00112233445566778899aabbcceeff0a\
@@ -384,7 +339,7 @@ mod tests {
                                     2233445566778899aabbcceeff0a0011\
                                     aabbcc",
         )
-        .unwrap();
+            .unwrap();
 
         let expected_ct = hex::decode(
             "a9757b8147956e9055b8a33de89f42fc\
@@ -393,7 +348,7 @@ mod tests {
                                     c60c14d4d3f883d0ab94420695c76deb\
                                     2c7552",
         )
-        .unwrap();
+            .unwrap();
         let expected_mac = hex::decode("cf5d656f40c34f5c46e8bb0e29fcdb4c").unwrap();
 
         let (ct, mac) = cipher.encrypt_mgm(&plaintext, &aad, &iv, 128);
@@ -429,14 +384,14 @@ mod tests {
             "23ca2715b02c68313bfdacb39e4d0fb8",
             "bcbce6c41aa355a4148862bf64bd830d",
         ]
-        .iter()
-        .map(|s| {
-            let v = hex::decode(s).unwrap();
-            let mut arr = [0u8; 16];
-            arr.copy_from_slice(&v);
-            arr
-        })
-        .collect();
+            .iter()
+            .map(|s| {
+                let v = hex::decode(s).unwrap();
+                let mut arr = [0u8; 16];
+                arr.copy_from_slice(&v);
+                arr
+            })
+            .collect();
 
         // Обработка A блоков
         for (i, a_block) in a_blocks.iter().enumerate() {

@@ -64,10 +64,7 @@ impl FileSource {
     }
 
     /// Рекурсивно сканирует указанные пути, собирает информацию о файлах (исключая те, что подпадают под шаблоны)
-    fn scan_paths(
-        paths: &[PathBuf],
-        exclude_patterns: &[String],
-    ) -> Result<(Vec<FileInfo>, u64, PathBuf)> {
+    fn scan_paths(paths: &[PathBuf], exclude_patterns: &[String]) -> Result<(Vec<FileInfo>, u64, PathBuf)> {
         let mut files = Vec::new();
         let mut total_size = 0;
 
@@ -79,11 +76,7 @@ impl FileSource {
                 continue;
             }
 
-            for entry in walkdir::WalkDir::new(path)
-                .follow_links(false)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
+            for entry in walkdir::WalkDir::new(path).follow_links(false).into_iter().filter_map(|e| e.ok()) {
                 let entry_path = entry.path();
 
                 if entry_path.is_dir() {
@@ -115,40 +108,24 @@ impl FileSource {
 
     /// Собирает метаданные отдельного файла или символьной ссылки
     fn get_file_info(path: &Path) -> Result<FileInfo> {
-        let metadata = fs::symlink_metadata(path)
-            .with_context(|| format!("Не удалось получить метаданные для {}", path.display()))?;
+        let metadata = fs::symlink_metadata(path).with_context(|| format!("Не удалось получить метаданные для {}", path.display()))?;
 
-        let abs_path = if path.is_relative() {
-            std::env::current_dir()?.join(path)
-        } else {
-            path.to_path_buf()
-        };
+        let abs_path = if path.is_relative() { std::env::current_dir()?.join(path) } else { path.to_path_buf() };
 
-        let mtime = metadata
-            .modified()
-            .map(|t| DateTime::<Utc>::from(t))
-            .unwrap_or_else(|_| Utc::now());
+        let mtime = metadata.modified().map(|t| DateTime::<Utc>::from(t)).unwrap_or_else(|_| Utc::now());
 
         let file_type = metadata.file_type();
         let is_symlink = file_type.is_symlink();
 
         let (size, hash, symlink_target) = if is_symlink {
-            let target = fs::read_link(path).with_context(|| {
-                format!(
-                    "Не удалось прочитать цель символьной ссылки: {}",
-                    path.display()
-                )
-            })?;
+            let target = fs::read_link(path).with_context(|| format!("Не удалось прочитать цель символьной ссылки: {}", path.display()))?;
             (0, String::new(), Some(target))
         } else if file_type.is_file() {
             let size = metadata.len();
             let hash = utils::calculate_file_hash(path)?;
             (size, hash, None)
         } else {
-            return Err(anyhow::anyhow!(
-                "Необычный тип файла (не обычный файл и не символьная ссылка): {}",
-                path.display()
-            ));
+            return Err(anyhow::anyhow!("Необычный тип файла (не обычный файл и не символьная ссылка): {}", path.display()));
         };
 
         #[cfg(unix)]
@@ -184,16 +161,10 @@ impl FileSource {
         debug!("Начинаю создание архива");
 
         if !self.common_root.exists() {
-            return Err(anyhow::anyhow!(
-                "Общий корневой каталог не существует: {:?}",
-                self.common_root
-            ));
+            return Err(anyhow::anyhow!("Общий корневой каталог не существует: {:?}", self.common_root));
         }
         if !self.common_root.is_dir() {
-            return Err(anyhow::anyhow!(
-                "Общий корневой каталог не является директорией: {:?}",
-                self.common_root
-            ));
+            return Err(anyhow::anyhow!("Общий корневой каталог не является директорией: {:?}", self.common_root));
         }
 
         let temp_file = NamedTempFile::new()?;
@@ -209,16 +180,13 @@ impl FileSource {
                 continue;
             }
 
-            let rel_path = file_info
-                .path
-                .strip_prefix(&self.common_root)
-                .with_context(|| {
-                    format!(
-                        "Не удалось получить относительный путь для {} (корень: {})",
-                        file_info.path.display(),
-                        self.common_root.display()
-                    )
-                })?;
+            let rel_path = file_info.path.strip_prefix(&self.common_root).with_context(|| {
+                format!(
+                    "Не удалось получить относительный путь для {} (корень: {})",
+                    file_info.path.display(),
+                    self.common_root.display()
+                )
+            })?;
 
             let mut header = tar::Header::new_gnu();
             header.set_mtime(file_info.mtime.timestamp() as u64);
@@ -240,43 +208,26 @@ impl FileSource {
                     header.set_entry_type(tar::EntryType::Symlink);
                     header.set_size(0);
                     header.set_cksum();
-                    tar_builder
-                        .append_link(&mut header, rel_path, target)
-                        .context("Не удалось добавить символьную ссылку")?;
+                    tar_builder.append_link(&mut header, rel_path, target).context("Не удалось добавить символьную ссылку")?;
                 } else {
-                    eprintln!(
-                        "[ПРЕДУПРЕЖДЕНИЕ] Символьная ссылка {} не имеет цели, пропускаю",
-                        file_info.path.display()
-                    );
+                    eprintln!("[ПРЕДУПРЕЖДЕНИЕ] Символьная ссылка {} не имеет цели, пропускаю", file_info.path.display());
                     continue;
                 }
             } else {
-                let _metadata = fs::metadata(&file_info.path).context(format!(
-                    "Не удалось прочитать метаданные для {}",
-                    file_info.path.display()
-                ))?;
+                let _metadata = fs::metadata(&file_info.path).context(format!("Не удалось прочитать метаданные для {}", file_info.path.display()))?;
 
-                let mut src_file = fs::File::open(&file_info.path).context(format!(
-                    "Не удалось открыть файл: {}",
-                    file_info.path.display()
-                ))?;
+                let mut src_file = fs::File::open(&file_info.path).context(format!("Не удалось открыть файл: {}", file_info.path.display()))?;
 
                 header.set_size(file_info.size);
                 header.set_entry_type(tar::EntryType::Regular);
                 header.set_cksum();
 
-                tar_builder
-                    .append_data(&mut header, rel_path, &mut src_file)
-                    .context("Не удалось добавить файл в архив")?;
+                tar_builder.append_data(&mut header, rel_path, &mut src_file).context("Не удалось добавить файл в архив")?;
             }
         }
 
-        let encoder = tar_builder
-            .into_inner()
-            .context("Не удалось завершить построение архива")?;
-        encoder
-            .finish()
-            .context("Не удалось завершить сжатие архива")?;
+        let encoder = tar_builder.into_inner().context("Не удалось завершить построение архива")?;
+        encoder.finish().context("Не удалось завершить сжатие архива")?;
 
         self.temp_archive = Some(temp_file);
         Ok(())

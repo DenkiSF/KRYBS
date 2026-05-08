@@ -155,3 +155,4 @@ exclude = ["*.tmp", "*.temp", "journal/"]
 # Логи обычно не содержат конфиденциальных данных.
 encrypt = false
 compression = 9
+

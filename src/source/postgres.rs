@@ -19,13 +19,7 @@ pub struct PostgresSource {
 
 impl PostgresSource {
     /// Создаёт новый источник PostgreSQL
-    pub fn new(
-        dbname: String,
-        host: String,
-        port: u16,
-        user: String,
-        password: Option<String>,
-    ) -> Self {
+    pub fn new(dbname: String, host: String, port: u16, user: String, password: Option<String>) -> Self {
         let name = format!("postgres-{}", dbname);
         Self {
             name,
@@ -71,9 +65,7 @@ impl BackupSource for PostgresSource {
 
     fn read(&mut self) -> Result<Box<dyn Read + Send + '_>> {
         let mut cmd = Command::new("pg_dump");
-        cmd.args(self.build_pg_dump_args())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.args(self.build_pg_dump_args()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
         // Если задан пароль, передаём его через переменную окружения
         if let Some(ref pass) = self.password {
@@ -84,17 +76,11 @@ impl BackupSource for PostgresSource {
 
         // wait_with_output читает stdout и stderr одновременно через внутренние треды,
         // исключая дедлок при переполнении буфера stderr (~64 КБ).
-        let result = child
-            .wait_with_output()
-            .context("Не удалось дождаться завершения pg_dump")?;
+        let result = child.wait_with_output().context("Не удалось дождаться завершения pg_dump")?;
 
         if !result.status.success() {
             let error_msg = String::from_utf8_lossy(&result.stderr);
-            anyhow::bail!(
-                "pg_dump завершился с ошибкой (код {}): {}",
-                result.status,
-                error_msg
-            );
+            anyhow::bail!("pg_dump завершился с ошибкой (код {}): {}", result.status, error_msg);
         }
 
         Ok(Box::new(std::io::Cursor::new(result.stdout)))

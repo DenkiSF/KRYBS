@@ -57,11 +57,7 @@ pub struct VerificationResult {
 impl VerificationResult {
     /// Проверка прошла успешно, если все проверки выполнены и нет отсутствующих/повреждённых файлов
     pub fn is_ok(&self) -> bool {
-        self.archive_ok
-            && self.decryption_ok
-            && self.extraction_ok
-            && self.files_missing.is_empty()
-            && self.files_corrupted.is_empty()
+        self.archive_ok && self.decryption_ok && self.extraction_ok && self.files_missing.is_empty() && self.files_corrupted.is_empty()
     }
 }
 
@@ -94,10 +90,7 @@ impl BackupEngine {
                     Crypto::new_with_key(*key)
                 }
                 Err(e) => {
-                    eprintln!(
-                        "[ПРЕДУПРЕЖДЕНИЕ] Не удалось загрузить ключ шифрования: {}",
-                        e
-                    );
+                    eprintln!("[ПРЕДУПРЕЖДЕНИЕ] Не удалось загрузить ключ шифрования: {}", e);
                     eprintln!("[ПРЕДУПРЕЖДЕНИЕ] Продолжаем без шифрования");
                     Crypto::new_without_encryption()
                 }
@@ -119,20 +112,11 @@ impl BackupEngine {
     // ------------------------------------------------------------------------
 
     /// Создаёт полную резервную копию из переданных источников данных
-    pub async fn create_backup_from_sources(
-        &self,
-        mut sources: Vec<Box<dyn BackupSource>>,
-        profile_name: Option<&str>,
-        progress: bool,
-    ) -> Result<BackupResult> {
+    pub async fn create_backup_from_sources(&self, mut sources: Vec<Box<dyn BackupSource>>, profile_name: Option<&str>, progress: bool) -> Result<BackupResult> {
         let start_time = Utc::now();
         let profile = profile_name.unwrap_or("manual").to_string();
 
-        info!(
-            "Запуск резервного копирования: профиль '{}', источников: {}",
-            profile,
-            sources.len()
-        );
+        info!("Запуск резервного копирования: профиль '{}', источников: {}", profile, sources.len());
 
         // Отфильтровываем пустые источники
         sources.retain(|s| !s.is_empty());
@@ -142,10 +126,7 @@ impl BackupEngine {
 
         let total_size_hint: u64 = sources.iter().filter_map(|s| s.size_hint()).sum();
 
-        info!(
-            "Общий оценочный размер: {}",
-            bytes_to_human(total_size_hint)
-        );
+        info!("Общий оценочный размер: {}", bytes_to_human(total_size_hint));
 
         let backup_id = self.storage.generate_id(BackupType::Full, start_time);
         let backup_dir = self.storage.backup_path(&backup_id);
@@ -157,22 +138,11 @@ impl BackupEngine {
 
         for (i, mut source) in sources.into_iter().enumerate() {
             let source_name = source.name().to_string();
-            info!(
-                "Обработка источника {}: {} ({} байт)",
-                i,
-                source_name,
-                source.size_hint().unwrap_or(0)
-            );
+            info!("Обработка источника {}: {} ({} байт)", i, source_name, source.size_hint().unwrap_or(0));
 
             // Создаём временный архив для текущего источника
-            let source_tar_path = backup_dir.join(format!(
-                "source_{}_{}.tar.gz",
-                i,
-                source_name.replace('/', "_")
-            ));
-            let source_tar_result = self
-                .create_single_source_archive(source.as_mut(), &source_tar_path)
-                .await?;
+            let source_tar_path = backup_dir.join(format!("source_{}_{}.tar.gz", i, source_name.replace('/', "_")));
+            let source_tar_result = self.create_single_source_archive(source.as_mut(), &source_tar_path).await?;
             let file_count = source_tar_result.file_count;
             source_archives.push((source_name, source_tar_path, source_tar_result));
             total_file_count += file_count;
@@ -224,10 +194,7 @@ impl BackupEngine {
         self.storage.write_local_index(&backup_info)?;
 
         let end_time = Utc::now();
-        let duration_secs = end_time
-            .signed_duration_since(start_time)
-            .num_milliseconds() as f64
-            / 1000.0;
+        let duration_secs = end_time.signed_duration_since(start_time).num_milliseconds() as f64 / 1000.0;
 
         let result = BackupResult {
             id: backup_id,
@@ -274,9 +241,7 @@ impl BackupEngine {
         let files = match manifest.get("files").and_then(|v| v.as_array()) {
             Some(f) => f,
             None => {
-                result
-                    .errors
-                    .push("В манифесте отсутствует список файлов".to_string());
+                result.errors.push("В манифесте отсутствует список файлов".to_string());
                 return Ok(result);
             }
         };
@@ -298,26 +263,20 @@ impl BackupEngine {
             let metadata = match fs::metadata(&file_path) {
                 Ok(m) => m,
                 Err(_) => {
-                    result
-                        .files_corrupted
-                        .push(format!("{} (не удалось прочитать метаданные)", rel_path));
+                    result.files_corrupted.push(format!("{} (не удалось прочитать метаданные)", rel_path));
                     continue;
                 }
             };
 
             if metadata.len() != expected_size {
-                result
-                    .files_corrupted
-                    .push(format!("{} (размер не совпадает)", rel_path));
+                result.files_corrupted.push(format!("{} (размер не совпадает)", rel_path));
                 continue;
             }
 
             let actual_hash = match calculate_file_hash(&file_path) {
                 Ok(h) => h,
                 Err(_) => {
-                    result
-                        .files_corrupted
-                        .push(format!("{} (не удалось вычислить хеш)", rel_path));
+                    result.files_corrupted.push(format!("{} (не удалось вычислить хеш)", rel_path));
                     continue;
                 }
             };
@@ -325,9 +284,7 @@ impl BackupEngine {
             if actual_hash == expected_hash {
                 result.files_matched += 1;
             } else {
-                result
-                    .files_corrupted
-                    .push(format!("{} (хеш не совпадает)", rel_path));
+                result.files_corrupted.push(format!("{} (хеш не совпадает)", rel_path));
             }
         }
 
@@ -335,16 +292,9 @@ impl BackupEngine {
     }
 
     /// Создаёт архив для одного источника (просто копирует поток данных в файл)
-    async fn create_single_source_archive(
-        &self,
-        source: &mut dyn BackupSource,
-        tar_path: &Path,
-    ) -> Result<SingleSourceResult> {
+    async fn create_single_source_archive(&self, source: &mut dyn BackupSource, tar_path: &Path) -> Result<SingleSourceResult> {
         let source_meta = source.metadata();
-        let file_count = source_meta
-            .get("file_count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
+        let file_count = source_meta.get("file_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
         let mut reader = source.read()?;
         let mut file = fs::File::create(tar_path)?;
@@ -357,12 +307,7 @@ impl BackupEngine {
     }
 
     /// Объединяет архивы от разных источников в один общий tar.gz
-    fn create_combined_archive(
-        &self,
-        source_archives: &[(String, PathBuf, SingleSourceResult)],
-        final_path: &Path,
-        _progress: bool,
-    ) -> Result<()> {
+    fn create_combined_archive(&self, source_archives: &[(String, PathBuf, SingleSourceResult)], final_path: &Path, _progress: bool) -> Result<()> {
         let file = fs::File::create(final_path)?;
         let encoder = GzEncoder::new(file, flate2::Compression::default());
         let mut tar_builder = Builder::new(encoder);
@@ -374,10 +319,7 @@ impl BackupEngine {
             header.set_cksum();
 
             let archive_name = format!("source_{}.tar.gz", i);
-            debug!(
-                "Добавление в общий архив: {} -> {}",
-                source_name, archive_name
-            );
+            debug!("Добавление в общий архив: {} -> {}", source_name, archive_name);
 
             tar_builder.append_data(&mut header, archive_name, &mut source_file)?;
         }
@@ -387,11 +329,7 @@ impl BackupEngine {
     }
 
     /// Создаёт манифест в формате JSON для резервной копии из нескольких источников
-    fn create_multi_source_manifest(
-        &self,
-        source_archives: &[(String, PathBuf, SingleSourceResult)],
-        encrypted: bool,
-    ) -> Result<Value> {
+    fn create_multi_source_manifest(&self, source_archives: &[(String, PathBuf, SingleSourceResult)], encrypted: bool) -> Result<Value> {
         let mut all_files = Vec::new();
         let mut sources_info = Vec::new();
 
@@ -447,12 +385,7 @@ impl BackupEngine {
     // ------------------------------------------------------------------------
 
     /// Выполняет проверку целостности указанной резервной копии
-    pub async fn verify_backup(
-        &self,
-        backup_id: &str,
-        quick: bool,
-        progress: bool,
-    ) -> Result<VerificationResult> {
+    pub async fn verify_backup(&self, backup_id: &str, quick: bool, progress: bool) -> Result<VerificationResult> {
         let mut result = VerificationResult {
             backup_id: backup_id.to_string(),
             quick,
@@ -469,9 +402,7 @@ impl BackupEngine {
         let backup_info = match self.storage.read_backup_info(backup_id) {
             Ok(info) => info,
             Err(e) => {
-                result
-                    .errors
-                    .push(format!("Не удалось прочитать информацию о копии: {}", e));
+                result.errors.push(format!("Не удалось прочитать информацию о копии: {}", e));
                 return Ok(result);
             }
         };
@@ -503,9 +434,7 @@ impl BackupEngine {
 
         if is_encrypted {
             if !self.crypto.is_enabled() {
-                result
-                    .errors
-                    .push("Архив зашифрован, но шифрование отключено".to_string());
+                result.errors.push("Архив зашифрован, но шифрование отключено".to_string());
                 return Ok(result);
             }
 
@@ -530,9 +459,7 @@ impl BackupEngine {
         let file = match std::fs::File::open(&archive_to_use) {
             Ok(f) => f,
             Err(e) => {
-                result
-                    .errors
-                    .push(format!("Не удалось открыть архив: {}", e));
+                result.errors.push(format!("Не удалось открыть архив: {}", e));
                 return Ok(result);
             }
         };
@@ -544,9 +471,7 @@ impl BackupEngine {
             match entry {
                 Ok(_) => {}
                 Err(e) => {
-                    result
-                        .errors
-                        .push(format!("Повреждённый элемент архива: {}", e));
+                    result.errors.push(format!("Повреждённый элемент архива: {}", e));
                     result.extraction_ok = false;
                     return Ok(result);
                 }
@@ -558,10 +483,7 @@ impl BackupEngine {
         // entry_count — это число вложенных source-архивов, а не отдельных файлов.
         let manifest_content = std::fs::read_to_string(&manifest_path)?;
         let manifest: serde_json::Value = serde_json::from_str(&manifest_content)?;
-        result.files_checked = manifest["files"]
-            .as_array()
-            .map(|f| f.len() as u64)
-            .unwrap_or(0);
+        result.files_checked = manifest["files"].as_array().map(|f| f.len() as u64).unwrap_or(0);
 
         if quick {
             println!("[ПРОВЕРКА] Быстрая проверка пройдена (структура архива корректна)");
@@ -598,9 +520,7 @@ impl BackupEngine {
             }
         }
 
-        let files = manifest["files"]
-            .as_array()
-            .ok_or_else(|| anyhow::anyhow!("Некорректный формат манифеста"))?;
+        let files = manifest["files"].as_array().ok_or_else(|| anyhow::anyhow!("Некорректный формат манифеста"))?;
         let total_files = files.len();
 
         let pb = if progress {
@@ -634,9 +554,7 @@ impl BackupEngine {
             let metadata = match std::fs::metadata(&file_path) {
                 Ok(m) => m,
                 Err(_) => {
-                    result
-                        .files_corrupted
-                        .push(format!("{} (не удалось прочитать метаданные)", rel_path));
+                    result.files_corrupted.push(format!("{} (не удалось прочитать метаданные)", rel_path));
                     if let Some(ref pb) = pb {
                         pb.inc(1);
                     }
@@ -645,9 +563,7 @@ impl BackupEngine {
             };
 
             if metadata.len() != expected_size {
-                result
-                    .files_corrupted
-                    .push(format!("{} (размер не совпадает)", rel_path));
+                result.files_corrupted.push(format!("{} (размер не совпадает)", rel_path));
                 if let Some(ref pb) = pb {
                     pb.inc(1);
                 }
@@ -657,9 +573,7 @@ impl BackupEngine {
             let actual_hash = match calculate_file_hash(&file_path) {
                 Ok(h) => h,
                 Err(_) => {
-                    result
-                        .files_corrupted
-                        .push(format!("{} (не удалось вычислить хеш)", rel_path));
+                    result.files_corrupted.push(format!("{} (не удалось вычислить хеш)", rel_path));
                     if let Some(ref pb) = pb {
                         pb.inc(1);
                     }
@@ -670,9 +584,7 @@ impl BackupEngine {
             if actual_hash == expected_hash {
                 result.files_matched += 1;
             } else {
-                result
-                    .files_corrupted
-                    .push(format!("{} (хеш не совпадает)", rel_path));
+                result.files_corrupted.push(format!("{} (хеш не совпадает)", rel_path));
             }
 
             if let Some(ref pb) = pb {
@@ -693,21 +605,14 @@ impl BackupEngine {
     // ------------------------------------------------------------------------
 
     /// Восстанавливает данные из резервной копии в указанный каталог
-    pub async fn restore_backup(
-        &self,
-        backup_id: &str,
-        destination: &Path,
-        specific_path: Option<&Path>,
-        overwrite: bool,
-        progress: bool,
-    ) -> Result<()> {
+    pub async fn restore_backup(&self, backup_id: &str, destination: &Path, specific_path: Option<&Path>, overwrite: bool, progress: bool) -> Result<()> {
         println!("[ИНФО] Восстановление резервной копии: {}", backup_id);
         println!("[ИНФО] Целевой каталог: {}", destination.display());
 
-        let backup_info = self.storage.read_backup_info(backup_id).context(format!(
-            "Не удалось прочитать информацию о копии: {}",
-            backup_id
-        ))?;
+        let backup_info = self
+            .storage
+            .read_backup_info(backup_id)
+            .context(format!("Не удалось прочитать информацию о копии: {}", backup_id))?;
 
         let backup_path = self.storage.backup_path(&backup_info.id);
         let encrypted_path = backup_path.join("data.tar.gz.enc");
@@ -725,9 +630,7 @@ impl BackupEngine {
         println!("[ИНФО] Зашифрован: {}", is_encrypted);
 
         if is_encrypted && !self.crypto.is_enabled() {
-            return Err(anyhow::anyhow!(
-                "Резервная копия зашифрована, но шифрование не включено. Загрузите ключ шифрования."
-            ));
+            return Err(anyhow::anyhow!("Резервная копия зашифрована, но шифрование не включено. Загрузите ключ шифрования."));
         }
 
         let temp_dir = tempfile::tempdir()?;
@@ -735,49 +638,23 @@ impl BackupEngine {
 
         if is_encrypted {
             println!("[ИНФО] Расшифровка архива с помощью шифра Кузнечик...");
-            self.crypto
-                .decrypt_file(archive_path, &temp_archive)
-                .context("Не удалось расшифровать архив")?;
+            self.crypto.decrypt_file(archive_path, &temp_archive).context("Не удалось расшифровать архив")?;
         } else {
             fs::copy(archive_path, &temp_archive)?;
         }
 
-        self.extract_archive(
-            &temp_archive,
-            destination,
-            specific_path,
-            overwrite,
-            progress,
-        )
-        .await?;
+        self.extract_archive(&temp_archive, destination, specific_path, overwrite, progress).await?;
 
-        println!(
-            "[УСПЕХ] Восстановление завершено в {}",
-            destination.display()
-        );
+        println!("[УСПЕХ] Восстановление завершено в {}", destination.display());
         Ok(())
     }
 
     /// Распаковывает архив (возможно, составной) в целевой каталог
     /// Распаковывает архив (возможно, составной) в целевой каталог
-    async fn extract_archive(
-        &self,
-        archive_path: &Path,
-        destination: &Path,
-        specific_path: Option<&Path>,
-        overwrite: bool,
-        progress: bool,
-    ) -> Result<()> {
-        let file = fs::File::open(archive_path).context(format!(
-            "Не удалось открыть архив: {}",
-            archive_path.display()
-        ))?;
+    async fn extract_archive(&self, archive_path: &Path, destination: &Path, specific_path: Option<&Path>, overwrite: bool, progress: bool) -> Result<()> {
+        let file = fs::File::open(archive_path).context(format!("Не удалось открыть архив: {}", archive_path.display()))?;
 
-        let pb = if progress {
-            Some(ProgressBar::new_spinner())
-        } else {
-            None
-        };
+        let pb = if progress { Some(ProgressBar::new_spinner()) } else { None };
 
         if let Some(ref pb) = pb {
             pb.set_style(ProgressStyle::default_spinner().template("{spinner} Извлечение: {msg}")?);
@@ -790,8 +667,7 @@ impl BackupEngine {
         archive.unpack(temp_extract_dir.path())?;
 
         // Затем распаковываем все вложенные архивы источников
-        let entries: Vec<_> =
-            fs::read_dir(temp_extract_dir.path())?.collect::<Result<Vec<_>, _>>()?;
+        let entries: Vec<_> = fs::read_dir(temp_extract_dir.path())?.collect::<Result<Vec<_>, _>>()?;
         for entry in entries {
             let path = entry.path();
             if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("gz") {
@@ -810,35 +686,24 @@ impl BackupEngine {
         }
 
         // Удаляем служебные архивы источников, чтобы они не попали в результат восстановления
-        let all_entries: Vec<_> =
-            fs::read_dir(temp_extract_dir.path())?.collect::<Result<Vec<_>, _>>()?;
+        let all_entries: Vec<_> = fs::read_dir(temp_extract_dir.path())?.collect::<Result<Vec<_>, _>>()?;
         for entry in all_entries {
             let fname = entry.file_name();
             if let Some(name) = fname.to_str() {
-                if name.starts_with("source_")
-                    && (name.ends_with(".tar.gz") || name.ends_with(".tgz"))
-                {
+                if name.starts_with("source_") && (name.ends_with(".tar.gz") || name.ends_with(".tgz")) {
                     fs::remove_file(entry.path())?;
                 }
             }
         }
 
         // Копируем все файлы из временной директории в целевую с учётом фильтра и перезаписи
-        let copy_options = fs_extra::dir::CopyOptions::new()
-            .overwrite(overwrite)
-            .skip_exist(!overwrite);
+        let copy_options = fs_extra::dir::CopyOptions::new().overwrite(overwrite).skip_exist(!overwrite);
 
-        let items_to_copy: Vec<_> = fs::read_dir(temp_extract_dir.path())?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .collect();
+        let items_to_copy: Vec<_> = fs::read_dir(temp_extract_dir.path())?.filter_map(|e| e.ok()).map(|e| e.path()).collect();
 
         for item in items_to_copy {
             if let Some(specific) = specific_path {
-                if !item
-                    .strip_prefix(temp_extract_dir.path())?
-                    .starts_with(specific)
-                {
+                if !item.strip_prefix(temp_extract_dir.path())?.starts_with(specific) {
                     continue;
                 }
             }
@@ -876,11 +741,7 @@ impl BackupEngine {
     }
 
     /// Проверяет, прошло ли достаточно времени с последней копии профиля
-    pub fn check_backup_interval(
-        &self,
-        profile: &str,
-        min_interval: Duration,
-    ) -> Result<Option<Duration>> {
+    pub fn check_backup_interval(&self, profile: &str, min_interval: Duration) -> Result<Option<Duration>> {
         let last_time = self.storage.last_backup_time_for_profile(profile)?;
 
         if let Some(last) = last_time {

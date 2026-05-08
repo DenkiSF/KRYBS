@@ -298,29 +298,21 @@ impl Config {
     /// Находит профиль по пути
     pub fn find_profile_by_path(&self, path: &Path) -> Option<&Profile> {
         let path_str = path.display().to_string();
-        self.profiles.iter().find(|p| {
-            p.paths
-                .iter()
-                .any(|profile_path| profile_path.display().to_string() == path_str)
-        })
+        self.profiles
+            .iter()
+            .find(|p| p.paths.iter().any(|profile_path| profile_path.display().to_string() == path_str))
     }
 
     /// Выполняет проверку корректности конфигурации
     pub fn validate(&self) -> Result<(), ConfigError> {
         // Проверка backup_dir
         if !self.core.backup_dir.is_absolute() {
-            return Err(ConfigError::Invalid(format!(
-                "backup_dir должен быть абсолютным путём: {}",
-                self.core.backup_dir.display()
-            )));
+            return Err(ConfigError::Invalid(format!("backup_dir должен быть абсолютным путём: {}", self.core.backup_dir.display())));
         }
 
         // Проверка temp_dir
         if !self.core.temp_dir.is_absolute() {
-            return Err(ConfigError::Invalid(format!(
-                "temp_dir должен быть абсолютным путём: {}",
-                self.core.temp_dir.display()
-            )));
+            return Err(ConfigError::Invalid(format!("temp_dir должен быть абсолютным путём: {}", self.core.temp_dir.display())));
         }
 
         // Проверка crypto.master_key_path
@@ -334,45 +326,31 @@ impl Config {
         // Проверка уровня сжатия профилей
         for profile in &self.profiles {
             if profile.compression > 9 {
-                return Err(ConfigError::Invalid(format!(
-                    "Уровень сжатия в профиле '{}' должен быть от 0 до 9",
-                    profile.name
-                )));
+                return Err(ConfigError::Invalid(format!("Уровень сжатия в профиле '{}' должен быть от 0 до 9", profile.name)));
             }
 
             if profile.paths.is_empty() {
-                return Err(ConfigError::Invalid(format!(
-                    "В профиле '{}' не указаны пути",
-                    profile.name
-                )));
+                return Err(ConfigError::Invalid(format!("В профиле '{}' не указаны пути", profile.name)));
             }
         }
 
         // Проверка настроек обслуживания
         if self.maintenance.max_age_days < 0 {
-            return Err(ConfigError::Invalid(
-                "max_age_days не может быть отрицательным".to_string(),
-            ));
+            return Err(ConfigError::Invalid("max_age_days не может быть отрицательным".to_string()));
         }
 
         if self.maintenance.max_backups == 0 {
-            return Err(ConfigError::Invalid(
-                "max_backups должен быть больше 0".to_string(),
-            ));
+            return Err(ConfigError::Invalid("max_backups должен быть больше 0".to_string()));
         }
 
         if let Some(compress) = self.maintenance.compress_old {
             if compress > 9 {
-                return Err(ConfigError::Invalid(
-                    "Уровень сжатия compress_old должен быть от 0 до 9".to_string(),
-                ));
+                return Err(ConfigError::Invalid("Уровень сжатия compress_old должен быть от 0 до 9".to_string()));
             }
         }
 
         if self.core.max_log_files == 0 {
-            return Err(ConfigError::Invalid(
-                "max_log_files должен быть больше 0".to_string(),
-            ));
+            return Err(ConfigError::Invalid("max_log_files должен быть больше 0".to_string()));
         }
 
         Ok(())
@@ -396,26 +374,11 @@ impl Config {
     pub fn info(&self) -> HashMap<String, String> {
         let mut info = HashMap::new();
 
-        info.insert(
-            "backup_dir".to_string(),
-            self.core.backup_dir.display().to_string(),
-        );
-        info.insert(
-            "master_key_path".to_string(),
-            self.crypto.master_key_path.display().to_string(),
-        );
-        info.insert(
-            "profiles_count".to_string(),
-            self.profiles.len().to_string(),
-        );
-        info.insert(
-            "max_age_days".to_string(),
-            self.maintenance.max_age_days.to_string(),
-        );
-        info.insert(
-            "max_backups".to_string(),
-            self.maintenance.max_backups.to_string(),
-        );
+        info.insert("backup_dir".to_string(), self.core.backup_dir.display().to_string());
+        info.insert("master_key_path".to_string(), self.crypto.master_key_path.display().to_string());
+        info.insert("profiles_count".to_string(), self.profiles.len().to_string());
+        info.insert("max_age_days".to_string(), self.maintenance.max_age_days.to_string());
+        info.insert("max_backups".to_string(), self.maintenance.max_backups.to_string());
 
         if !self.profiles.is_empty() {
             let profile_names: Vec<String> = self.profiles.iter().map(|p| p.name.clone()).collect();
@@ -469,12 +432,7 @@ fn get_config_paths(custom_path: Option<&Path>) -> Vec<PathBuf> {
 }
 
 /// Инициализирует конфигурационный файл с настройками по умолчанию или примерами
-pub fn init_config(
-    output_path: Option<&Path>,
-    interactive: bool,
-    defaults: bool,
-    examples: bool,
-) -> Result<()> {
+pub fn init_config(output_path: Option<&Path>, interactive: bool, defaults: bool, examples: bool) -> Result<()> {
     let mut config = Config::default();
 
     if examples && !defaults {
@@ -482,10 +440,7 @@ pub fn init_config(
         config.profiles = vec![
             Profile {
                 name: "postgres".to_string(),
-                paths: vec![
-                    PathBuf::from("/var/lib/postgresql"),
-                    PathBuf::from("/etc/postgresql"),
-                ],
+                paths: vec![PathBuf::from("/var/lib/postgresql"), PathBuf::from("/etc/postgresql")],
                 exclude: vec!["*.wal".to_string()],
                 encrypt: true,
                 compression: 6,
@@ -529,27 +484,12 @@ pub fn init_config(
 
     println!("Создание файла конфигурации: {}", save_path.display());
     println!("Параметры конфигурации:");
-    println!(
-        "  Каталог резервных копий: {}",
-        config.core.backup_dir.display()
-    );
-    println!(
-        "  Временный каталог:       {}",
-        config.core.temp_dir.display()
-    );
-    println!(
-        "  Путь к мастер-ключу:     {}",
-        config.crypto.master_key_path.display()
-    );
+    println!("  Каталог резервных копий: {}", config.core.backup_dir.display());
+    println!("  Временный каталог:       {}", config.core.temp_dir.display());
+    println!("  Путь к мастер-ключу:     {}", config.crypto.master_key_path.display());
     println!("  Удалять открытые копии:  {}", config.crypto.delete_plain);
-    println!(
-        "  Макс. возраст копий:     {} дн.",
-        config.maintenance.max_age_days
-    );
-    println!(
-        "  Макс. количество копий:  {}",
-        config.maintenance.max_backups
-    );
+    println!("  Макс. возраст копий:     {} дн.", config.maintenance.max_age_days);
+    println!("  Макс. количество копий:  {}", config.maintenance.max_backups);
 
     if !config.profiles.is_empty() {
         println!("  Примеры профилей ({}):", config.profiles.len());
@@ -592,25 +532,14 @@ pub fn init_config(
     fs::create_dir_all(&config.core.temp_dir)?;
 
     // Сохраняем конфигурацию
-    config
-        .save(&save_path)
-        .context("Не удалось сохранить конфигурацию")?;
+    config.save(&save_path).context("Не удалось сохранить конфигурацию")?;
 
     println!("\n[УСПЕХ] Конфигурация успешно сохранена!");
     println!("  Файл конфигурации:          {}", save_path.display());
-    println!(
-        "  Каталог резервных копий:    {}",
-        config.core.backup_dir.display()
-    );
-    println!(
-        "  Временный каталог:          {}",
-        config.core.temp_dir.display()
-    );
+    println!("  Каталог резервных копий:    {}", config.core.backup_dir.display());
+    println!("  Временный каталог:          {}", config.core.temp_dir.display());
     println!("\n[ВАЖНО] Дальнейшие шаги:");
-    println!(
-        "  1. Сгенерируйте ключ шифрования: krybs keygen --output {}",
-        config.crypto.master_key_path.display()
-    );
+    println!("  1. Сгенерируйте ключ шифрования: krybs keygen --output {}", config.crypto.master_key_path.display());
     println!("  2. Протестируйте резервное копирование: krybs backup --profile system-logs");
     println!("  3. Проверьте состояние: krybs status");
 
